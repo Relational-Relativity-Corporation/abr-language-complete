@@ -354,10 +354,10 @@ pub fn verify_completeness(
 mod tests {
     use super::*;
 
-    fn make_stream(text: &str) -> (CompleteStream, String) {
+    fn make_stream_named(text: &str, filename: &str) -> (CompleteStream, String) {
         use std::io::Write;
         let mut tmp = std::env::temp_dir();
-        tmp.push("abr_lc_test.txt");
+        tmp.push(filename);
         {
             let mut f = std::fs::File::create(&tmp).unwrap();
             f.write_all(text.as_bytes()).unwrap();
@@ -370,57 +370,49 @@ mod tests {
     #[test]
     fn test_stream_length_matches_char_count() {
         let text = "Hello, World! How are you?";
-        let (stream, _) = make_stream(text);
+        let (stream, _) = make_stream_named(text, "abr_lc_t1.txt");
         assert_eq!(stream.len(), text.chars().count());
     }
 
     #[test]
     fn test_reconstruction_invariant() {
         let text = "The quick brown fox.\nIt jumped over the lazy dog!";
-        let (stream, original) = make_stream(text);
+        let (stream, original) = make_stream_named(text, "abr_lc_t2.txt");
         assert_eq!(stream.reconstruct(), original);
     }
 
     #[test]
     fn test_reconstruction_with_punctuation() {
         let text = "\"Hello,\" she said. It's Darwin's theory.";
-        let (stream, original) = make_stream(text);
+        let (stream, original) = make_stream_named(text, "abr_lc_t3.txt");
         assert_eq!(stream.reconstruct(), original);
     }
 
     #[test]
     fn test_case_states_observed() {
         let text = "Hello WORLD";
-        let (stream, _) = make_stream(text);
+        let (stream, _) = make_stream_named(text, "abr_lc_t4.txt");
         let cases: Vec<CaseState> = stream.positions.iter()
             .map(|p| p.case_state)
             .collect();
-        // H
         assert_eq!(cases[0], CaseState::Upper);
-        // e
         assert_eq!(cases[1], CaseState::Lower);
-        // space
         assert_eq!(cases[5], CaseState::NonAlpha);
-        // W
         assert_eq!(cases[6], CaseState::Upper);
     }
 
     #[test]
     fn test_char_classes_observed() {
         let text = "Hi. It's done!";
-        let (stream, _) = make_stream(text);
+        let (stream, _) = make_stream_named(text, "abr_lc_t5.txt");
         let classes: Vec<CharClass> = stream.positions.iter()
             .map(|p| p.char_class)
             .collect();
-        // H
         assert_eq!(classes[0], CharClass::Alpha);
-        // .
         assert_eq!(classes[2], CharClass::Period);
-        // apostrophe in "It's"
         let apos_pos = stream.positions.iter()
             .find(|p| p.char_class == CharClass::Apostrophe);
         assert!(apos_pos.is_some());
-        // !
         let excl_pos = stream.positions.iter()
             .find(|p| p.char_class == CharClass::Exclamation);
         assert!(excl_pos.is_some());
@@ -428,11 +420,8 @@ mod tests {
 
     #[test]
     fn test_no_position_is_unclassified() {
-        let text = "All chars: a-z, A-Z, 0-9, spaces\n\"quotes\" (parens) [brackets].";
-        let (stream, _) = make_stream(text);
-        // Every position has a character and a class — the type system
-        // guarantees this since CharClass::Other catches everything else.
-        // Verify no position silently lost its character.
+        let text = "All chars: a-z, A-Z, 0-9, spaces\n.";
+        let (stream, _) = make_stream_named(text, "abr_lc_t6.txt");
         assert_eq!(stream.len(), text.chars().count());
         for pos in &stream.positions {
             assert_eq!(pos.reconstruct(), pos.character);
@@ -441,31 +430,28 @@ mod tests {
 
     #[test]
     fn test_apostrophe_observed_not_classified() {
-        // Phase 0: apostrophe is observed as Apostrophe class.
-        // Contraction vs possession is NOT determined here.
         let text = "it's Darwin's";
-        let (stream, _) = make_stream(text);
+        let (stream, _) = make_stream_named(text, "abr_lc_t7.txt");
         let apostrophes: Vec<_> = stream.positions.iter()
             .filter(|p| p.char_class == CharClass::Apostrophe)
             .collect();
         assert_eq!(apostrophes.len(), 2);
-        // Both are Apostrophe — no contraction/possession distinction at Phase 0
     }
 
     #[test]
     fn test_hyphen_family_all_classified() {
         let text = "well-known\u{2013}en\u{2014}em";
-        let (stream, _) = make_stream(text);
+        let (stream, _) = make_stream_named(text, "abr_lc_t8.txt");
         let hyphens: Vec<_> = stream.positions.iter()
             .filter(|p| p.char_class == CharClass::Hyphen)
             .collect();
-        assert_eq!(hyphens.len(), 3); // hyphen-minus, en dash, em dash
+        assert_eq!(hyphens.len(), 3);
     }
 
     #[test]
     fn test_newline_preserved_separately() {
         let text = "line one\nline two\nline three";
-        let (stream, _) = make_stream(text);
+        let (stream, _) = make_stream_named(text, "abr_lc_t9.txt");
         let newlines: Vec<_> = stream.positions.iter()
             .filter(|p| p.char_class == CharClass::Newline)
             .collect();
@@ -477,22 +463,18 @@ mod tests {
         use std::io::Write;
         let text1 = "First file content.";
         let text2 = "Second file content!";
-
         let mut tmp1 = std::env::temp_dir();
-        tmp1.push("abr_lc_test1.txt");
+        tmp1.push("abr_lc_t10a.txt");
         let mut tmp2 = std::env::temp_dir();
-        tmp2.push("abr_lc_test2.txt");
-
+        tmp2.push("abr_lc_t10b.txt");
         std::fs::File::create(&tmp1).unwrap()
             .write_all(text1.as_bytes()).unwrap();
         std::fs::File::create(&tmp2).unwrap()
             .write_all(text2.as_bytes()).unwrap();
-
         let stream = CompleteStream::from_files(&[
             ("file1", tmp1.to_str().unwrap()),
             ("file2", tmp2.to_str().unwrap()),
         ]).unwrap();
-
         assert_eq!(stream.reconstruct_file(0), text1);
         assert_eq!(stream.reconstruct_file(1), text2);
     }
@@ -500,7 +482,7 @@ mod tests {
     #[test]
     fn test_completeness_verification_passes() {
         let text = "Hello, World! \"Quoted.\" It's fine.";
-        let (stream, original) = make_stream(text);
+        let (stream, original) = make_stream_named(text, "abr_lc_t11.txt");
         let originals = vec![("test", original.clone())];
         let report = verify_completeness(&stream, &originals);
         assert!(report.lengths_match);
@@ -511,10 +493,10 @@ mod tests {
     #[test]
     fn test_upper_lower_nonalpha_counts() {
         let text = "Hi! 123";
-        let (stream, _) = make_stream(text);
+        let (stream, _) = make_stream_named(text, "abr_lc_t12.txt");
         let cases = stream.case_counts();
-        assert!(cases.get("Upper").copied().unwrap_or(0) >= 1); // H
-        assert!(cases.get("Lower").copied().unwrap_or(0) >= 1); // i
-        assert!(cases.get("NonAlpha").copied().unwrap_or(0) >= 1); // ! space 1 2 3
+        assert!(cases.get("Upper").copied().unwrap_or(0) >= 1);
+        assert!(cases.get("Lower").copied().unwrap_or(0) >= 1);
+        assert!(cases.get("NonAlpha").copied().unwrap_or(0) >= 1);
     }
 }
