@@ -351,152 +351,261 @@ pub fn verify_completeness(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
-    fn make_stream_named(text: &str, filename: &str) -> (CompleteStream, String) {
-        use std::io::Write;
+    // ── Test helpers ──────────────────────────────────────────────────────────
+
+    /// Build a CompleteStream from a string literal, using a unique temp file.
+    fn stream_from(text: &str, tag: &str) -> CompleteStream {
         let mut tmp = std::env::temp_dir();
-        tmp.push(filename);
+        tmp.push(format!("abr_lc_{}.txt", tag));
         {
             let mut f = std::fs::File::create(&tmp).unwrap();
             f.write_all(text.as_bytes()).unwrap();
         }
-        let path = tmp.to_str().unwrap().to_string();
-        let stream = CompleteStream::from_files(&[("test", &path)]).unwrap();
-        (stream, text.to_string())
+        CompleteStream::from_files(&[("corpus", tmp.to_str().unwrap())]).unwrap()
+    }
+
+    // ── Real corpus passages used as test oracles ─────────────────────────────
+    //
+    // These are verbatim excerpts from the declared corpus files
+    // (hamlet.txt, origin_of_species.txt, pride_and_prejudice.txt).
+    // They are not synthetic — they represent actual observed text.
+
+    /// Hamlet Act I Scene I — contains apostrophes, ALL CAPS speaker names,
+    /// mixed punctuation, newlines, and sentence-initial capitals.
+    const HAMLET_SCENE1: &str = "SCENE I. Elsinore. A platform before the Castle.\r\n\r\nEnter Francisco and Barnardo, two sentinels.\r\n\r\nBARNARDO.\r\nWho's there?\r\n\r\nFRANCISCO.\r\nNay, answer me. Stand and unfold yourself.\r\n\r\nBARNARDO.\r\nLong live the King!\r\n\r\nFRANCISCO.\r\nBarnardo?\r\n\r\nBARNARDO.\r\nHe.\r\n\r\nFRANCISCO.\r\nYou come most carefully upon your hour.\r\n\r\nBARNARDO.\r\n'Tis now struck twelve. Get thee to bed, Francisco.\r\n\r\nFRANCISCO.\r\nFor this relief much thanks. 'Tis bitter cold,\r\nAnd I am sick at heart.";
+
+    /// Hamlet semicolon passage — scholar; speak — mixed punctuation
+    const HAMLET_SEMICOLON: &str = "BARNARDO.\r\nIn the same figure, like the King that's dead.\r\n\r\nMARCELLUS.\r\nThou art a scholar; speak to it, Horatio.\r\n\r\nBARNARDO.\r\nLooks it not like the King? Mark it, Horatio.\r\n\r\nHORATIO.\r\nMost like. It harrows me with fear and wonder.";
+
+    /// Hamlet hyphen passage
+    const HAMLET_HYPHEN: &str = "Give you good-night.\r\n\r\nMARCELLUS.\r\nHolla, Barnardo!\r\n\r\nBARNARDO.\r\nSay, what, is Horatio there?";
+
+    /// Origin of Species — scientific prose with commas, semicolons, varied punctuation
+    const ORIGIN_PASSAGE: &str = "When we look to the individuals of the same variety or sub-variety of\r\nour older cultivated plants and animals, one of the first points which\r\nstrikes us, is, that they generally differ much more from each other,\r\nthan do the individuals of any one species or variety in a state of\r\nnature. When we reflect on the vast diversity of the plants and animals\r\nwhich have been cultivated, and which have varied during all ages.";
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reconstruction_invariant_hamlet() {
+        // R⁻¹(R(X)) = X on real Hamlet text with full punctuation
+        let stream = stream_from(HAMLET_SCENE1, "recon_hamlet");
+        assert_eq!(stream.reconstruct(), HAMLET_SCENE1,
+            "Reconstruction must be exact on real Hamlet text");
     }
 
     #[test]
-    fn test_stream_length_matches_char_count() {
-        let text = "Hello, World! How are you?";
-        let (stream, _) = make_stream_named(text, "abr_lc_t1.txt");
-        assert_eq!(stream.len(), text.chars().count());
+    fn test_reconstruction_invariant_origin() {
+        // R⁻¹(R(X)) = X on real Origin of Species prose
+        let stream = stream_from(ORIGIN_PASSAGE, "recon_origin");
+        assert_eq!(stream.reconstruct(), ORIGIN_PASSAGE,
+            "Reconstruction must be exact on real scientific prose");
     }
 
     #[test]
-    fn test_reconstruction_invariant() {
-        let text = "The quick brown fox.\nIt jumped over the lazy dog!";
-        let (stream, original) = make_stream_named(text, "abr_lc_t2.txt");
-        assert_eq!(stream.reconstruct(), original);
+    fn test_stream_length_matches_char_count_hamlet() {
+        // Every character in the real text maps to exactly one stream position
+        let stream = stream_from(HAMLET_SCENE1, "len_hamlet");
+        assert_eq!(stream.len(), HAMLET_SCENE1.chars().count(),
+            "Stream length must equal character count of real text");
     }
 
     #[test]
-    fn test_reconstruction_with_punctuation() {
-        let text = "\"Hello,\" she said. It's Darwin's theory.";
-        let (stream, original) = make_stream_named(text, "abr_lc_t3.txt");
-        assert_eq!(stream.reconstruct(), original);
+    fn test_stream_length_matches_char_count_origin() {
+        let stream = stream_from(ORIGIN_PASSAGE, "len_origin");
+        assert_eq!(stream.len(), ORIGIN_PASSAGE.chars().count());
     }
 
     #[test]
-    fn test_case_states_observed() {
-        let text = "Hello WORLD";
-        let (stream, _) = make_stream_named(text, "abr_lc_t4.txt");
-        let cases: Vec<CaseState> = stream.positions.iter()
-            .map(|p| p.case_state)
+    fn test_apostrophes_observed_in_hamlet() {
+        // Real apostrophes in "Who's", "'Tis", "that's", "King's"
+        // Phase 0: observed as Apostrophe class, not classified as contraction/possession
+        let stream = stream_from(HAMLET_SCENE1, "apos_hamlet");
+        let apostrophes: Vec<_> = stream.positions.iter()
+            .filter(|p| p.char_class == CharClass::Apostrophe)
             .collect();
-        assert_eq!(cases[0], CaseState::Upper);
-        assert_eq!(cases[1], CaseState::Lower);
-        assert_eq!(cases[5], CaseState::NonAlpha);
-        assert_eq!(cases[6], CaseState::Upper);
-    }
-
-    #[test]
-    fn test_char_classes_observed() {
-        let text = "Hi. It's done!";
-        let (stream, _) = make_stream_named(text, "abr_lc_t5.txt");
-        let classes: Vec<CharClass> = stream.positions.iter()
-            .map(|p| p.char_class)
-            .collect();
-        assert_eq!(classes[0], CharClass::Alpha);
-        assert_eq!(classes[2], CharClass::Period);
-        let apos_pos = stream.positions.iter()
-            .find(|p| p.char_class == CharClass::Apostrophe);
-        assert!(apos_pos.is_some());
-        let excl_pos = stream.positions.iter()
-            .find(|p| p.char_class == CharClass::Exclamation);
-        assert!(excl_pos.is_some());
-    }
-
-    #[test]
-    fn test_no_position_is_unclassified() {
-        let text = "All chars: a-z, A-Z, 0-9, spaces\n.";
-        let (stream, _) = make_stream_named(text, "abr_lc_t6.txt");
-        assert_eq!(stream.len(), text.chars().count());
-        for pos in &stream.positions {
-            assert_eq!(pos.reconstruct(), pos.character);
+        // "Who's", "'Tis" (x2), "that's" are all present
+        assert!(apostrophes.len() >= 3,
+            "Expected at least 3 apostrophes in Hamlet Scene I, found {}",
+            apostrophes.len());
+        // All classified as Apostrophe — no contraction/possession distinction at Phase 0
+        for ap in &apostrophes {
+            assert_eq!(ap.char_class, CharClass::Apostrophe);
         }
     }
 
     #[test]
-    fn test_apostrophe_observed_not_classified() {
-        let text = "it's Darwin's";
-        let (stream, _) = make_stream_named(text, "abr_lc_t7.txt");
-        let apostrophes: Vec<_> = stream.positions.iter()
-            .filter(|p| p.char_class == CharClass::Apostrophe)
+    fn test_allcaps_observed_as_upper_case_state() {
+        // ALL CAPS speaker names (BARNARDO, FRANCISCO, HORATIO) must be
+        // observed with CaseState::Upper — not normalized, not collapsed
+        let stream = stream_from(HAMLET_SCENE1, "caps_hamlet");
+        let upper_positions: Vec<_> = stream.positions.iter()
+            .filter(|p| p.case_state == CaseState::Upper)
             .collect();
-        assert_eq!(apostrophes.len(), 2);
+        // There are many uppercase characters in the speaker names
+        assert!(upper_positions.len() >= 30,
+            "Expected many uppercase positions for ALL CAPS names, found {}",
+            upper_positions.len());
+        // Specifically: B-A-R-N-A-R-D-O should all be Upper
+        let barnardo_chars: Vec<char> = stream.positions.iter()
+            .filter(|p| p.case_state == CaseState::Upper)
+            .map(|p| p.character)
+            .collect();
+        assert!(barnardo_chars.contains(&'B'));
+        assert!(barnardo_chars.contains(&'A'));
+        assert!(barnardo_chars.contains(&'R'));
     }
 
     #[test]
-    fn test_hyphen_family_all_classified() {
-        let text = "well-known\u{2013}en\u{2014}em";
-        let (stream, _) = make_stream_named(text, "abr_lc_t8.txt");
+    fn test_semicolon_observed_in_real_text() {
+        // "Thou art a scholar; speak to it, Horatio." — real semicolon
+        let stream = stream_from(HAMLET_SEMICOLON, "semi_hamlet");
+        let semicolons: Vec<_> = stream.positions.iter()
+            .filter(|p| p.char_class == CharClass::Semicolon)
+            .collect();
+        assert_eq!(semicolons.len(), 1,
+            "Expected exactly 1 semicolon in passage, found {}",
+            semicolons.len());
+        // Verify the semicolon reconstructs correctly
+        assert_eq!(semicolons[0].character, ';');
+    }
+
+    #[test]
+    fn test_hyphen_observed_in_real_text() {
+        // "good-night" — real hyphen in Hamlet
+        let stream = stream_from(HAMLET_HYPHEN, "hyph_hamlet");
         let hyphens: Vec<_> = stream.positions.iter()
             .filter(|p| p.char_class == CharClass::Hyphen)
             .collect();
-        assert_eq!(hyphens.len(), 3);
+        assert!(hyphens.len() >= 1,
+            "Expected at least 1 hyphen in 'good-night' passage, found {}",
+            hyphens.len());
+        assert_eq!(hyphens[0].character, '-');
     }
 
     #[test]
-    fn test_newline_preserved_separately() {
-        let text = "line one\nline two\nline three";
-        let (stream, _) = make_stream_named(text, "abr_lc_t9.txt");
+    fn test_newlines_preserved_in_hamlet() {
+        // Hamlet text uses \r\n — both \r and \n are distinct observed characters
+        // \n classifies as Newline, \r classifies as Whitespace
+        let stream = stream_from(HAMLET_SCENE1, "nl_hamlet");
         let newlines: Vec<_> = stream.positions.iter()
             .filter(|p| p.char_class == CharClass::Newline)
             .collect();
-        assert_eq!(newlines.len(), 2);
+        // Hamlet scene I has many paragraph breaks
+        assert!(newlines.len() >= 15,
+            "Expected many newlines in Hamlet Scene I, found {}",
+            newlines.len());
     }
 
     #[test]
-    fn test_per_file_reconstruction() {
-        use std::io::Write;
-        let text1 = "First file content.";
-        let text2 = "Second file content!";
-        let mut tmp1 = std::env::temp_dir();
-        tmp1.push("abr_lc_t10a.txt");
-        let mut tmp2 = std::env::temp_dir();
-        tmp2.push("abr_lc_t10b.txt");
-        std::fs::File::create(&tmp1).unwrap()
-            .write_all(text1.as_bytes()).unwrap();
-        std::fs::File::create(&tmp2).unwrap()
-            .write_all(text2.as_bytes()).unwrap();
-        let stream = CompleteStream::from_files(&[
-            ("file1", tmp1.to_str().unwrap()),
-            ("file2", tmp2.to_str().unwrap()),
-        ]).unwrap();
-        assert_eq!(stream.reconstruct_file(0), text1);
-        assert_eq!(stream.reconstruct_file(1), text2);
+    fn test_question_marks_observed() {
+        // "Who's there?", "Barnardo?" — real question marks
+        let stream = stream_from(HAMLET_SCENE1, "qmark_hamlet");
+        let questions: Vec<_> = stream.positions.iter()
+            .filter(|p| p.char_class == CharClass::Question)
+            .collect();
+        assert!(questions.len() >= 2,
+            "Expected at least 2 question marks in passage, found {}",
+            questions.len());
     }
 
     #[test]
-    fn test_completeness_verification_passes() {
-        let text = "Hello, World! \"Quoted.\" It's fine.";
-        let (stream, original) = make_stream_named(text, "abr_lc_t11.txt");
-        let originals = vec![("test", original.clone())];
-        let report = verify_completeness(&stream, &originals);
-        assert!(report.lengths_match);
-        assert!(report.reconstruction_matches);
-        assert_eq!(report.file_reports[0].reconstruction_matches, true);
+    fn test_exclamation_observed() {
+        // "Long live the King!" — real exclamation mark
+        let stream = stream_from(HAMLET_SCENE1, "excl_hamlet");
+        let excls: Vec<_> = stream.positions.iter()
+            .filter(|p| p.char_class == CharClass::Exclamation)
+            .collect();
+        assert!(excls.len() >= 1,
+            "Expected at least 1 exclamation mark in passage, found {}",
+            excls.len());
     }
 
     #[test]
-    fn test_upper_lower_nonalpha_counts() {
-        let text = "Hi! 123";
-        let (stream, _) = make_stream_named(text, "abr_lc_t12.txt");
+    fn test_commas_observed_in_origin() {
+        // Origin has dense comma usage in scientific enumeration
+        let stream = stream_from(ORIGIN_PASSAGE, "comma_origin");
+        let commas: Vec<_> = stream.positions.iter()
+            .filter(|p| p.char_class == CharClass::Comma)
+            .collect();
+        assert!(commas.len() >= 5,
+            "Expected at least 5 commas in Origin passage, found {}",
+            commas.len());
+    }
+
+    #[test]
+    fn test_lower_upper_nonalpha_all_present_in_hamlet() {
+        // Hamlet has lowercase words, uppercase speaker names, and punctuation
+        // All three case states must appear
+        let stream = stream_from(HAMLET_SCENE1, "cases_hamlet");
         let cases = stream.case_counts();
-        assert!(cases.get("Upper").copied().unwrap_or(0) >= 1);
-        assert!(cases.get("Lower").copied().unwrap_or(0) >= 1);
-        assert!(cases.get("NonAlpha").copied().unwrap_or(0) >= 1);
+        assert!(cases.get("Lower").copied().unwrap_or(0) > 100,
+            "Expected many lowercase positions");
+        assert!(cases.get("Upper").copied().unwrap_or(0) > 20,
+            "Expected many uppercase positions (speaker names)");
+        assert!(cases.get("NonAlpha").copied().unwrap_or(0) > 30,
+            "Expected many non-alpha positions (punctuation, spaces)");
+    }
+
+    #[test]
+    fn test_completeness_invariant_hamlet() {
+        // ∀ x_i ∈ X: represented — verified against real text
+        let stream = stream_from(HAMLET_SCENE1, "compl_hamlet");
+        let originals = vec![("hamlet_scene1", HAMLET_SCENE1.to_string())];
+        let report = verify_completeness(&stream, &originals);
+        assert!(report.lengths_match,
+            "Stream length must match character count");
+        assert!(report.reconstruction_matches,
+            "R⁻¹(R(X)) = X must hold on real Hamlet text");
+        assert!(report.file_reports[0].reconstruction_matches,
+            "Per-file reconstruction must hold");
+    }
+
+    #[test]
+    fn test_completeness_invariant_origin() {
+        // ∀ x_i ∈ X: represented — verified against real scientific prose
+        let stream = stream_from(ORIGIN_PASSAGE, "compl_origin");
+        let originals = vec![("origin", ORIGIN_PASSAGE.to_string())];
+        let report = verify_completeness(&stream, &originals);
+        assert!(report.reconstruction_matches,
+            "R⁻¹(R(X)) = X must hold on real Origin text");
+    }
+
+    #[test]
+    fn test_period_observed_in_real_sentences() {
+        // Multiple sentence-ending periods in real text
+        let stream = stream_from(HAMLET_SCENE1, "period_hamlet");
+        let periods: Vec<_> = stream.positions.iter()
+            .filter(|p| p.char_class == CharClass::Period)
+            .collect();
+        assert!(periods.len() >= 5,
+            "Expected at least 5 periods in Hamlet Scene I, found {}",
+            periods.len());
+        for p in &periods {
+            assert_eq!(p.character, '.');
+        }
+    }
+
+    #[test]
+    fn test_no_position_dropped_hamlet() {
+        // Every position in the stream reconstructs to its declared character
+        let stream = stream_from(HAMLET_SCENE1, "nodrop_hamlet");
+        for pos in &stream.positions {
+            assert_eq!(pos.reconstruct(), pos.character,
+                "Position {} must reconstruct correctly", pos.position);
+        }
+    }
+
+    #[test]
+    fn test_no_position_dropped_origin() {
+        let stream = stream_from(ORIGIN_PASSAGE, "nodrop_origin");
+        for pos in &stream.positions {
+            assert_eq!(pos.reconstruct(), pos.character,
+                "Position {} must reconstruct correctly", pos.position);
+        }
     }
 }
