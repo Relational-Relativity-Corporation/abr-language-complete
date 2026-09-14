@@ -609,3 +609,372 @@ mod tests {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 1A: PRIMITIVE RELATIONAL SUBSTRATE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// For every adjacent pair (x_i, x_{i+1}) in the complete stream, record:
+//   R_P: i → i+1                          (progression)
+//   R_C: class(x_i) → class(x_{i+1})     (class transition)
+//   R_E: case(x_i) → case(x_{i+1})       (case transition)
+//   Δ_C: [class(x_i) ≠ class(x_{i+1})]   (class transition locus)
+//   Δ_E: [case(x_i) ≠ case(x_{i+1})]     (case transition locus)
+//
+// ACCOUNTING INVARIANT:
+//   |R_P| = |X| - F
+//   where F = number of source files (progression does not cross file boundaries)
+//
+// Every non-final position participates in exactly one forward successor.
+// Every non-initial position participates in exactly one predecessor.
+// Every adjacent pair has exactly one R_C and exactly one R_E observation.
+// Zero unaccounted pairs.
+//
+// DISCIPLINE:
+//   Transition is observed. Boundary is to be determined.
+//   No transition locus is called a boundary here.
+//   No linguistic label is assigned to any relation.
+
+/// A single relational observation between two adjacent stream positions.
+/// Every field is directly derived from Phase 0 observables — no interpretation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AdjacentRelation {
+    /// R_P: the predecessor position index
+    pub i: usize,
+    /// R_P: the successor position index (always i + 1 within a file)
+    pub j: usize,
+
+    /// R_C: the class transition (class at i → class at j)
+    pub class_from: CharClass,
+    pub class_to: CharClass,
+
+    /// R_E: the case transition (case at i → case at j)
+    pub case_from: CaseState,
+    pub case_to: CaseState,
+
+    /// Δ_C: true iff class(x_i) ≠ class(x_{i+1})
+    pub class_transition: bool,
+
+    /// Δ_E: true iff case(x_i) ≠ case(x_{i+1})
+    pub case_transition: bool,
+
+    /// Source file index — progression does not cross file boundaries
+    pub source_file_index: usize,
+}
+
+/// The complete Phase 1A relational substrate over a CompleteStream.
+/// Contains exactly |X| - F adjacent relations where F = number of source files.
+pub struct RelationalSubstrate {
+    pub relations: Vec<AdjacentRelation>,
+    /// Number of source files (F in the accounting invariant)
+    pub file_count: usize,
+    /// Total stream positions (|X|)
+    pub stream_length: usize,
+}
+
+impl RelationalSubstrate {
+    /// Derive the complete relational substrate from a CompleteStream.
+    /// Progression does not cross file boundaries.
+    pub fn from_stream(stream: &CompleteStream) -> Self {
+        let mut relations = Vec::with_capacity(stream.len().saturating_sub(stream.source_files.len()));
+
+        let positions = &stream.positions;
+        let n = positions.len();
+
+        for i in 0..n.saturating_sub(1) {
+            let xi = &positions[i];
+            let xj = &positions[i + 1];
+
+            // Progression does not cross file boundaries
+            if xi.source_file_index != xj.source_file_index {
+                continue;
+            }
+
+            relations.push(AdjacentRelation {
+                i: xi.position,
+                j: xj.position,
+                class_from: xi.char_class,
+                class_to: xj.char_class,
+                case_from: xi.case_state,
+                case_to: xj.case_state,
+                class_transition: xi.char_class != xj.char_class,
+                case_transition: xi.case_state != xj.case_state,
+                source_file_index: xi.source_file_index,
+            });
+        }
+
+        RelationalSubstrate {
+            relations,
+            file_count: stream.source_files.len(),
+            stream_length: stream.len(),
+        }
+    }
+
+    /// Verify the accounting invariant: |R_P| = |X| - F
+    pub fn verify_accounting(&self) -> AccountingReport {
+        let expected = self.stream_length.saturating_sub(self.file_count);
+        let actual = self.relations.len();
+        let invariant_holds = actual == expected;
+
+        // Verify every non-final position has exactly one forward successor
+        // and every non-initial position has exactly one predecessor
+        // within its file — verified by checking for duplicate i values
+        let mut i_seen = std::collections::HashSet::new();
+        let mut duplicate_i = 0usize;
+        for rel in &self.relations {
+            if !i_seen.insert(rel.i) {
+                duplicate_i += 1;
+            }
+        }
+
+        // Count class transition loci (Δ_C = true)
+        let class_transition_count = self.relations.iter()
+            .filter(|r| r.class_transition)
+            .count();
+
+        // Count case transition loci (Δ_E = true)
+        let case_transition_count = self.relations.iter()
+            .filter(|r| r.case_transition)
+            .count();
+
+        // Class transition table: how often does each class pair occur
+        let mut class_transition_table: std::collections::HashMap<(String, String), usize> =
+            std::collections::HashMap::new();
+        for rel in &self.relations {
+            let key = (format!("{:?}", rel.class_from), format!("{:?}", rel.class_to));
+            *class_transition_table.entry(key).or_insert(0) += 1;
+        }
+
+        // Case transition table
+        let mut case_transition_table: std::collections::HashMap<(String, String), usize> =
+            std::collections::HashMap::new();
+        for rel in &self.relations {
+            let key = (format!("{:?}", rel.case_from), format!("{:?}", rel.case_to));
+            *case_transition_table.entry(key).or_insert(0) += 1;
+        }
+
+        AccountingReport {
+            expected_relations: expected,
+            actual_relations: actual,
+            invariant_holds,
+            duplicate_predecessor_positions: duplicate_i,
+            class_transition_loci: class_transition_count,
+            case_transition_loci: case_transition_count,
+            class_transition_table,
+            case_transition_table,
+        }
+    }
+}
+
+/// Result of the Phase 1A accounting verification.
+#[derive(Debug)]
+pub struct AccountingReport {
+    /// Expected: |X| - F
+    pub expected_relations: usize,
+    /// Actual: |R_P|
+    pub actual_relations: usize,
+    /// |R_P| == |X| - F
+    pub invariant_holds: bool,
+    /// Should be 0: each position i appears as predecessor at most once
+    pub duplicate_predecessor_positions: usize,
+    /// Count of positions where Δ_C = true
+    pub class_transition_loci: usize,
+    /// Count of positions where Δ_E = true
+    pub case_transition_loci: usize,
+    /// R_C transition table: (class_from, class_to) → count
+    pub class_transition_table: std::collections::HashMap<(String, String), usize>,
+    /// R_E transition table: (case_from, case_to) → count
+    pub case_transition_table: std::collections::HashMap<(String, String), usize>,
+}
+
+
+#[cfg(test)]
+mod tests_phase1a {
+    use super::*;
+    use std::io::Write;
+
+    // Real corpus passages — same declared texts as Phase 0 tests
+    const HAMLET_SCENE1: &str = "SCENE I. Elsinore. A platform before the Castle.\r\n\r\nEnter Francisco and Barnardo, two sentinels.\r\n\r\nBARNARDO.\r\nWho's there?\r\n\r\nFRANCISCO.\r\nNay, answer me. Stand and unfold yourself.\r\n\r\nBARNARDO.\r\nLong live the King!\r\n\r\nFRANCISCO.\r\nBarnardo?\r\n\r\nBARNARDO.\r\nHe.\r\n\r\nFRANCISCO.\r\nYou come most carefully upon your hour.\r\n\r\nBARNARDO.\r\n'Tis now struck twelve. Get thee to bed, Francisco.\r\n\r\nFRANCISCO.\r\nFor this relief much thanks. 'Tis bitter cold,\r\nAnd I am sick at heart.";
+
+    const ORIGIN_PASSAGE: &str = "When we look to the individuals of the same variety or sub-variety of\r\nour older cultivated plants and animals, one of the first points which\r\nstrikes us, is, that they generally differ much more from each other,\r\nthan do the individuals of any one species or variety in a state of\r\nnature. When we reflect on the vast diversity of the plants and animals\r\nwhich have been cultivated, and which have varied during all ages.";
+
+    fn substrate_from(text: &str, tag: &str) -> (CompleteStream, RelationalSubstrate) {
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("abr_lc_1a_{}.txt", tag));
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            f.write_all(text.as_bytes()).unwrap();
+        }
+        let stream = CompleteStream::from_files(&[("corpus", tmp.to_str().unwrap())]).unwrap();
+        let substrate = RelationalSubstrate::from_stream(&stream);
+        (stream, substrate)
+    }
+
+    #[test]
+    fn test_accounting_invariant_hamlet() {
+        // |R_P| = |X| - F on real Hamlet text (F=1 file)
+        let (stream, substrate) = substrate_from(HAMLET_SCENE1, "acct_hamlet");
+        let report = substrate.verify_accounting();
+        assert!(report.invariant_holds,
+            "Expected {} relations, got {}",
+            report.expected_relations, report.actual_relations);
+        assert_eq!(report.expected_relations, stream.len() - 1,
+            "|R_P| must equal |X| - 1 for single file");
+    }
+
+    #[test]
+    fn test_accounting_invariant_origin() {
+        // |R_P| = |X| - F on real Origin text
+        let (stream, substrate) = substrate_from(ORIGIN_PASSAGE, "acct_origin");
+        let report = substrate.verify_accounting();
+        assert!(report.invariant_holds,
+            "Accounting invariant must hold on Origin passage");
+    }
+
+    #[test]
+    fn test_no_duplicate_predecessor_positions() {
+        // Every position i appears as predecessor at most once
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "nodup_hamlet");
+        let report = substrate.verify_accounting();
+        assert_eq!(report.duplicate_predecessor_positions, 0,
+            "Each position must appear as predecessor exactly once");
+    }
+
+    #[test]
+    fn test_relation_count_matches_char_pairs() {
+        // For a single file: exactly len-1 relations
+        let text = HAMLET_SCENE1;
+        let (stream, substrate) = substrate_from(text, "count_hamlet");
+        assert_eq!(substrate.relations.len(), stream.len() - 1,
+            "Relation count must be character count minus 1 for single file");
+    }
+
+    #[test]
+    fn test_progression_is_strictly_sequential() {
+        // Every relation has j = i + 1 — no gaps, no jumps
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "seq_hamlet");
+        for rel in &substrate.relations {
+            assert_eq!(rel.j, rel.i + 1,
+                "Progression must be strictly sequential: j = i + 1");
+        }
+    }
+
+    #[test]
+    fn test_class_transition_observed_at_alpha_to_period() {
+        // "SCENE I." — Alpha→Period transition must appear
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "cls_period");
+        let alpha_to_period = substrate.relations.iter()
+            .filter(|r| r.class_from == CharClass::Alpha
+                     && r.class_to == CharClass::Period)
+            .count();
+        assert!(alpha_to_period >= 1,
+            "Expected at least one Alpha→Period transition in real text");
+    }
+
+    #[test]
+    fn test_class_transition_observed_at_alpha_to_whitespace() {
+        // Word→space transitions must be the most common class transition
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "cls_ws");
+        let alpha_to_ws = substrate.relations.iter()
+            .filter(|r| r.class_from == CharClass::Alpha
+                     && r.class_to == CharClass::Whitespace)
+            .count();
+        assert!(alpha_to_ws >= 20,
+            "Expected many Alpha→Whitespace transitions in Hamlet Scene I, found {}",
+            alpha_to_ws);
+    }
+
+    #[test]
+    fn test_class_transition_loci_not_called_boundaries() {
+        // Verify Δ_C is populated but we make no claim about what it means
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "delta_c");
+        let report = substrate.verify_accounting();
+        assert!(report.class_transition_loci > 0,
+            "There must be class transition loci in real text");
+        // The count is less than total relations — not every pair is a transition
+        assert!(report.class_transition_loci < substrate.relations.len(),
+            "Not every pair is a class transition");
+        // We assert nothing about what these transitions mean
+    }
+
+    #[test]
+    fn test_case_transition_upper_to_lower_observed() {
+        // "BARNARDO" → next char after name is period, then newline, then 'W' (lower)
+        // Upper→Lower must occur (e.g. "BARNARDO.\nWho" — O→. is Upper→NonAlpha,
+        // then later a word like "Who" has Upper→Lower within it is not present,
+        // but "BARNARDO" itself: B(Upper)A(Upper) — no, all Upper→Upper within caps
+        // The real Upper→Lower occurs at sentence-initial words like "Who's" — W→h
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "case_ul");
+        let upper_to_lower = substrate.relations.iter()
+            .filter(|r| r.case_from == CaseState::Upper
+                     && r.case_to == CaseState::Lower)
+            .count();
+        // "Who's" W→h, "Nay" N→a, "Long" L→o, "Barnardo" B→a, etc.
+        assert!(upper_to_lower >= 5,
+            "Expected at least 5 Upper→Lower transitions in Hamlet Scene I, found {}",
+            upper_to_lower);
+    }
+
+    #[test]
+    fn test_case_transition_loci_populated() {
+        // Δ_E must be populated — case changes occur in real text
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "delta_e");
+        let report = substrate.verify_accounting();
+        assert!(report.case_transition_loci > 0,
+            "Case transition loci must exist in real text");
+    }
+
+    #[test]
+    fn test_file_boundary_not_crossed() {
+        // When two files are loaded, relations do not cross the boundary
+        use std::io::Write;
+        let text1 = "First.";
+        let text2 = "Second.";
+        let mut tmp1 = std::env::temp_dir();
+        tmp1.push("abr_lc_1a_fb1.txt");
+        let mut tmp2 = std::env::temp_dir();
+        tmp2.push("abr_lc_1a_fb2.txt");
+        std::fs::File::create(&tmp1).unwrap().write_all(text1.as_bytes()).unwrap();
+        std::fs::File::create(&tmp2).unwrap().write_all(text2.as_bytes()).unwrap();
+
+        let stream = CompleteStream::from_files(&[
+            ("f1", tmp1.to_str().unwrap()),
+            ("f2", tmp2.to_str().unwrap()),
+        ]).unwrap();
+        let substrate = RelationalSubstrate::from_stream(&stream);
+
+        // Two files: expected |X| - 2 relations
+        assert_eq!(substrate.relations.len(),
+            stream.len() - 2,
+            "|R_P| must equal |X| - F where F=2 files");
+
+        // No relation spans files
+        for rel in &substrate.relations {
+            assert_eq!(
+                stream.positions[rel.i].source_file_index,
+                stream.positions[rel.j].source_file_index,
+                "Relation must not cross file boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn test_r_c_covers_all_observed_transitions_in_passage() {
+        // The class transition table must account for all relations
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "rc_total");
+        let report = substrate.verify_accounting();
+        let table_total: usize = report.class_transition_table.values().sum();
+        assert_eq!(table_total, substrate.relations.len(),
+            "R_C transition table must cover all relations");
+    }
+
+    #[test]
+    fn test_r_e_covers_all_observed_transitions_in_passage() {
+        // The case transition table must account for all relations
+        let (_, substrate) = substrate_from(HAMLET_SCENE1, "re_total");
+        let report = substrate.verify_accounting();
+        let table_total: usize = report.case_transition_table.values().sum();
+        assert_eq!(table_total, substrate.relations.len(),
+            "R_E transition table must cover all relations");
+    }
+}

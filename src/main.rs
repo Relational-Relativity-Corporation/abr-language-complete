@@ -1,10 +1,10 @@
 // abr-language-complete  main.rs
-// V0.1.0 — Phase 0: Complete Observable Stream
+// V0.2.0 — Phase 1A: Primitive Relational Substrate
 // Origin: Robin Macomber / Metatron Dynamics
 
-use abr_language_complete::{CompleteStream, verify_completeness};
+use abr_language_complete::{CompleteStream, verify_completeness, RelationalSubstrate};
 use std::fs;
-use std::path::Path;
+use std::cmp::Reverse;
 
 const CORPUS_DIR: &str = r"C:\Users\Robin Macomber\Documents\Metatron_Dynamics\GitHub_Repos\abr-language-complete\corpus";
 const RESULTS_DIR: &str = r"C:\Users\Robin Macomber\Documents\Metatron_Dynamics\GitHub_Repos\abr-language-complete\results";
@@ -17,16 +17,15 @@ const CORPUS_FILES: &[&str] = &[
 ];
 
 fn main() {
-    println!("=== abr-language-complete V0.1.0 ===");
-    println!("Phase 0: Complete Observable Stream");
-    println!("Completeness invariant: ∀ x_i ∈ X, x_i remains represented.");
-    println!("Reconstruction invariant: R⁻¹(R(X)) = X");
+    println!("=== abr-language-complete V0.2.0 ===");
+    println!("Phase 1A: Primitive Relational Substrate");
+    println!("Transition is observed. Boundary is to be determined.");
     println!();
 
     fs::create_dir_all(RESULTS_DIR).expect("Cannot create results dir");
 
-    // ── Load corpus files ──────────────────────────────────────────────────
-    println!("[1] Loading corpus files...");
+    // ── Phase 0: Load and verify complete stream ───────────────────────────
+    println!("[1] Loading corpus and building complete stream...");
     let mut file_paths: Vec<(String, String)> = Vec::new();
     let mut original_texts: Vec<(String, String)> = Vec::new();
 
@@ -35,7 +34,7 @@ fn main() {
         match fs::read_to_string(&full_path) {
             Ok(text) => {
                 println!("    {} — {} chars", fname, text.chars().count());
-                file_paths.push((fname.to_string(), full_path.clone()));
+                file_paths.push((fname.to_string(), full_path));
                 original_texts.push((fname.to_string(), text));
             }
             Err(e) => {
@@ -44,10 +43,7 @@ fn main() {
             }
         }
     }
-    println!();
 
-    // ── Build complete stream ──────────────────────────────────────────────
-    println!("[2] Building complete observable stream...");
     let path_refs: Vec<(&str, &str)> = file_paths
         .iter()
         .map(|(n, p)| (n.as_str(), p.as_str()))
@@ -56,107 +52,107 @@ fn main() {
     let stream = CompleteStream::from_files(&path_refs)
         .unwrap_or_else(|e| { eprintln!("Stream error: {}", e); std::process::exit(1); });
 
-    println!("    Total positions: {}", stream.len());
-    println!();
+    println!("    Total positions |X|: {}", stream.len());
 
-    // ── Verify completeness ────────────────────────────────────────────────
-    println!("[3] Verifying completeness and reconstruction invariants...");
+    // Verify Phase 0 invariants still hold
     let orig_refs: Vec<(&str, String)> = original_texts
         .iter()
         .map(|(n, t)| (n.as_str(), t.clone()))
         .collect();
+    let phase0 = verify_completeness(&stream, &orig_refs);
+    assert!(phase0.lengths_match, "Phase 0 length invariant violated");
+    assert!(phase0.reconstruction_matches, "Phase 0 reconstruction invariant violated");
+    println!("    Phase 0 invariants: PASS");
+    println!();
 
-    let report = verify_completeness(&stream, &orig_refs);
+    // ── Phase 1A: Derive relational substrate ─────────────────────────────
+    println!("[2] Deriving Phase 1A relational substrate...");
+    let substrate = RelationalSubstrate::from_stream(&stream);
+    println!("    Relations derived: {}", substrate.relations.len());
+    println!("    Source files (F):  {}", substrate.file_count);
+    println!("    Expected |X| - F:  {}", stream.len() - substrate.file_count);
+    println!();
 
-    println!("    Stream length:        {}", report.stream_length);
-    println!("    Total file chars:     {}", report.total_file_chars);
-    println!("    Lengths match:        {}", if report.lengths_match { "PASS" } else { "FAIL" });
-    println!("    Reconstruction:       {}", if report.reconstruction_matches { "PASS ✓ R⁻¹(R(X))=X" } else { "FAIL" });
-    println!("    All classes covered:  {}", if report.all_classes_covered { "PASS" } else { "FAIL" });
+    // ── Verify accounting invariant ────────────────────────────────────────
+    println!("[3] Verifying accounting invariant |R_P| = |X| - F...");
+    let report = substrate.verify_accounting();
 
-    if !report.missing_classes.is_empty() {
-        println!("    Missing classes: {:?}", report.missing_classes);
+    println!("    Expected: {}", report.expected_relations);
+    println!("    Actual:   {}", report.actual_relations);
+    println!("    Invariant holds:              {}",
+        if report.invariant_holds { "PASS" } else { "FAIL" });
+    println!("    Duplicate predecessor positions: {} (must be 0)",
+        report.duplicate_predecessor_positions);
+    println!("    Class transition loci (Δ_C):  {}", report.class_transition_loci);
+    println!("    Case transition loci (Δ_E):   {}", report.case_transition_loci);
+    println!();
+
+    if !report.invariant_holds || report.duplicate_predecessor_positions > 0 {
+        eprintln!("PHASE 1A FAILED — accounting invariant violated");
+        std::process::exit(1);
+    }
+
+    // ── Class transition table ─────────────────────────────────────────────
+    println!("[4] Class transition table R_C (top 30 by count):");
+    let mut class_pairs: Vec<((String, String), usize)> =
+        report.class_transition_table.into_iter().collect();
+    class_pairs.sort_by_key(|(_, c)| Reverse(*c));
+    for ((from, to), count) in class_pairs.iter().take(30) {
+        let pct = 100.0 * (*count as f64) / (substrate.relations.len() as f64);
+        println!("    {:15} → {:15}  {:>8}  ({:.2}%)", from, to, count, pct);
     }
     println!();
 
-    // ── Per-file report ────────────────────────────────────────────────────
-    println!("[4] Per-file verification:");
-    for fr in &report.file_reports {
-        let status = if fr.reconstruction_matches { "PASS" } else { "FAIL" };
-        println!("    {} — declared: {} chars, stream: {} chars, reconstruction: {}",
-            fr.name, fr.declared_length, fr.stream_length, status);
-    }
-    println!();
-
-    // ── Character class distribution ───────────────────────────────────────
-    println!("[5] Character class distribution:");
-    let mut classes: Vec<(String, usize)> = report.class_counts.into_iter().collect();
-    classes.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
-    for (class, count) in &classes {
-        let pct = 100.0 * (*count as f64) / (report.stream_length as f64);
-        println!("    {:15} {:>8}  ({:.2}%)", class, count, pct);
-    }
-    println!();
-
-    // ── Case state distribution ────────────────────────────────────────────
-    println!("[6] Case state distribution:");
-    let mut cases: Vec<(String, usize)> = report.case_counts.into_iter().collect();
-    cases.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
-    for (case, count) in &cases {
-        let pct = 100.0 * (*count as f64) / (report.stream_length as f64);
-        println!("    {:15} {:>8}  ({:.2}%)", case, count, pct);
+    // ── Case transition table ──────────────────────────────────────────────
+    println!("[5] Case transition table R_E:");
+    let mut case_pairs: Vec<((String, String), usize)> =
+        report.case_transition_table.into_iter().collect();
+    case_pairs.sort_by_key(|(_, c)| Reverse(*c));
+    for ((from, to), count) in &case_pairs {
+        let pct = 100.0 * (*count as f64) / (substrate.relations.len() as f64);
+        println!("    {:15} → {:15}  {:>8}  ({:.2}%)", from, to, count, pct);
     }
     println!();
 
     // ── Write results ──────────────────────────────────────────────────────
-    println!("[7] Writing stream report...");
-    let report_path = format!("{}\\stream_report_v0.1.0.txt", RESULTS_DIR);
+    println!("[6] Writing Phase 1A report...");
+    let report_path = format!("{}\\phase1a_report_v0.2.0.txt", RESULTS_DIR);
     let mut out = String::new();
-    out.push_str("# abr-language-complete — Stream Report V0.1.0\n");
-    out.push_str("# Phase 0: Complete Observable Stream\n\n");
-    out.push_str(&format!("Stream length:       {}\n", report.stream_length));
-    out.push_str(&format!("Total file chars:    {}\n", report.total_file_chars));
-    out.push_str(&format!("Lengths match:       {}\n", report.lengths_match));
-    out.push_str(&format!("Reconstruction:      {}\n", report.reconstruction_matches));
-    out.push_str(&format!("All classes covered: {}\n\n", report.all_classes_covered));
+    out.push_str("# abr-language-complete — Phase 1A Report V0.2.0\n");
+    out.push_str("# Primitive Relational Substrate\n");
+    out.push_str("# Transition is observed. Boundary is to be determined.\n\n");
+    out.push_str(&format!("|X| (stream positions):    {}\n", stream.len()));
+    out.push_str(&format!("F  (source files):         {}\n", substrate.file_count));
+    out.push_str(&format!("|R_P| (relations):         {}\n", substrate.relations.len()));
+    out.push_str(&format!("|X| - F (expected):        {}\n", report.expected_relations));
+    out.push_str(&format!("Invariant |R_P|=|X|-F:     {}\n", report.invariant_holds));
+    out.push_str(&format!("Duplicate predecessors:    {}\n", report.duplicate_predecessor_positions));
+    out.push_str(&format!("Class transition loci Δ_C: {}\n", report.class_transition_loci));
+    out.push_str(&format!("Case transition loci Δ_E:  {}\n\n", report.case_transition_loci));
 
-    out.push_str("Character class distribution:\n");
-    for (class, count) in &classes {
-        let pct = 100.0 * (*count as f64) / (report.stream_length as f64);
-        out.push_str(&format!("  {:15} {:>8}  ({:.2}%)\n", class, count, pct));
+    out.push_str("Class transition table R_C (class_from → class_to, count):\n");
+    for ((from, to), count) in &class_pairs {
+        let pct = 100.0 * (*count as f64) / (substrate.relations.len() as f64);
+        out.push_str(&format!("  {:15} → {:15}  {}  ({:.3}%)\n", from, to, count, pct));
     }
 
-    out.push_str("\nCase state distribution:\n");
-    for (case, count) in &cases {
-        let pct = 100.0 * (*count as f64) / (report.stream_length as f64);
-        out.push_str(&format!("  {:15} {:>8}  ({:.2}%)\n", case, count, pct));
+    out.push_str("\nCase transition table R_E (case_from → case_to, count):\n");
+    for ((from, to), count) in &case_pairs {
+        let pct = 100.0 * (*count as f64) / (substrate.relations.len() as f64);
+        out.push_str(&format!("  {:15} → {:15}  {}  ({:.3}%)\n", from, to, count, pct));
     }
 
-    out.push_str("\nPer-file verification:\n");
-    for fr in &report.file_reports {
-        out.push_str(&format!("  {} — {} chars — reconstruction: {}\n",
-            fr.name, fr.declared_length,
-            if fr.reconstruction_matches { "PASS" } else { "FAIL" }));
-    }
-
-    fs::write(&report_path, out).expect("Cannot write stream report");
+    fs::write(&report_path, out).expect("Cannot write Phase 1A report");
     println!("    Written: {}", report_path);
 
     // ── Final verdict ──────────────────────────────────────────────────────
     println!();
-    let pass = report.lengths_match && report.reconstruction_matches;
-    if pass {
-        println!("═══════════════════════════════════════════");
-        println!("  PHASE 0 COMPLETE — INVARIANTS HOLD");
-        println!("  ∀ x_i ∈ X: represented ✓");
-        println!("  R⁻¹(R(X)) = X ✓");
-        println!("  Zero unaccounted positions ✓");
-        println!("═══════════════════════════════════════════");
-    } else {
-        eprintln!("PHASE 0 FAILED — invariant violation detected");
-        std::process::exit(1);
-    }
+    println!("═══════════════════════════════════════════════════════");
+    println!("  PHASE 1A COMPLETE — ACCOUNTING INVARIANT HOLDS");
+    println!("  |R_P| = |X| - F ✓");
+    println!("  Every non-final position: exactly one successor ✓");
+    println!("  Every adjacent pair: one R_C, one R_E observation ✓");
+    println!("  Zero unaccounted pairs ✓");
+    println!("  Transition observed. Boundary to be determined. ✓");
+    println!("═══════════════════════════════════════════════════════");
 }
-
-// Allow Reverse for sort
-use std::cmp::Reverse;
