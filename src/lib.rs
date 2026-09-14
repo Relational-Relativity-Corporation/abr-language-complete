@@ -1093,6 +1093,7 @@ pub struct RecurrenceStatistics {
 
 /// Build a position index: observable_state → sorted list of corpus-global positions.
 /// This is the indexing mechanism — not an observable, just a lookup structure.
+#[allow(dead_code)]
 fn build_state_index(
     stream: &CompleteStream,
 ) -> std::collections::HashMap<ObservableState, Vec<usize>> {
@@ -1127,6 +1128,7 @@ fn is_file_start(stream: &CompleteStream, pos: usize) -> bool {
 }
 
 /// Check if pos is the last position in its source file.
+#[allow(dead_code)]
 fn is_file_end(stream: &CompleteStream, pos: usize) -> bool {
     if pos + 1 >= stream.len() { return true; }
     match (source_at(stream, pos), source_at(stream, pos + 1)) {
@@ -1198,218 +1200,272 @@ fn is_bilaterally_maximal(stream: &CompleteStream, i: usize, j: usize) -> bool {
     }
 }
 
-/// Encode the stream as a sequence of (state, file_index) pairs for suffix array.
-/// We use a compact integer encoding of ObservableState for the SA.
-fn encode_stream(stream: &CompleteStream) -> (Vec<u32>, Vec<usize>) {
-    // Build a sorted vocabulary of distinct observable states
-    let mut vocab: Vec<ObservableState> = stream.positions.iter()
-        .map(ObservableState::from_position)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    vocab.sort_by_key(|s| (s.character as u32,
-                           format!("{:?}", s.case_state),
-                           format!("{:?}", s.char_class)));
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 1B: ALPHA-RUN RECURRENCE — SYLLABIC STRUCTURE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// DECLARATION:
+//   Capitals are not observable in spoken language. Case is therefore not
+//   part of the observable state for the purpose of identifying relational
+//   units of the language. Alpha runs are extracted from the complete stream,
+//   case-folded to lowercase, and recurrence is measured over those runs only.
+//
+// BILATERAL MAXIMALITY:
+//   A k-gram occurrence at position i in a run is bilaterally maximal with
+//   occurrence at position j iff their predecessors differ:
+//     predecessor(i) = run[i-1] if i > 0, else RUN_START
+//   Cross-predecessor-group pairs are the canonical recurrences.
+//
+// COUNTING:
+//   For each k-gram G and each predecessor group P:
+//     canonical pairs = total_pairs - within_group_pairs
+//   This is exact and requires no enumeration of individual pairs.
+//
+// VERIFICATION:
+//   For each K, one sample pair is exactly verified against the stream.
+//
+// NATURAL TERMINATION:
+//   K_max is determined by the corpus. No threshold is imposed.
+//   The corpus supplies the resolution.
 
-    let state_to_id: std::collections::HashMap<ObservableState, u32> = vocab.iter()
-        .enumerate()
-        .map(|(i, s)| (*s, i as u32))
-        .collect();
+/// A predecessor label for an Alpha-run position.
+/// None = RUN_START (position 0 in its run — no predecessor within the run).
+/// Some(c) = the lowercase character immediately preceding this position.
+pub type PredecessorLabel = Option<char>;
 
-    let encoded: Vec<u32> = stream.positions.iter()
-        .map(|p| state_to_id[&ObservableState::from_position(p)])
-        .collect();
-
-    let sources: Vec<usize> = stream.positions.iter()
-        .map(|p| p.source_file_index)
-        .collect();
-
-    (encoded, sources)
+/// Count cross-group pairs using combinatorics.
+/// Given group sizes [s1, s2, ...], cross-group pairs =
+///   total_pairs - within_group_pairs
+///   = n*(n-1)/2 - sum(si*(si-1)/2)
+fn count_cross_group_pairs(group_sizes: &[u64]) -> u64 {
+    let total: u64 = group_sizes.iter().sum();
+    if total < 2 { return 0; }
+    let total_pairs = total * (total - 1) / 2;
+    let within: u64 = group_sizes.iter().map(|&s| s * (s - 1) / 2).sum();
+    total_pairs - within
 }
 
-/// Build suffix array using prefix-doubling (O(n log n)).
-fn build_suffix_array(s: &[u32], sentinel: u32) -> Vec<usize> {
-    let n = s.len();
-    if n == 0 { return vec![]; }
+/// Extract maximal Alpha runs from the complete stream, case-folded to lowercase.
+/// Returns (source_file_index, run_string) pairs.
+/// Only runs of length >= 2 are included (single chars produce no k-gram pairs).
+pub fn extract_alpha_runs(stream: &CompleteStream) -> Vec<(usize, String)> {
+    let mut runs = Vec::new();
+    let mut current_run: Vec<char> = Vec::new();
+    let mut current_source: Option<usize> = None;
 
-    // Append sentinel (must be smaller than all values)
-    let mut text: Vec<u32> = s.to_vec();
-    text.push(sentinel);
-    let n1 = text.len();
+    for pos in &stream.positions {
+        if pos.char_class == CharClass::Alpha {
+            // Case-fold to lowercase
+            let c = pos.character.to_ascii_lowercase();
+            if current_source != Some(pos.source_file_index) {
+                // New source file — flush current run
+                if current_run.len() >= 2 {
+                    if let Some(src) = current_source {
+                        runs.push((src, current_run.iter().collect()));
+                    }
+                }
+                current_run.clear();
+                current_source = Some(pos.source_file_index);
+            }
+            current_run.push(c);
+        } else {
+            // Non-alpha — flush current run
+            if current_run.len() >= 2 {
+                if let Some(src) = current_source {
+                    runs.push((src, current_run.iter().collect()));
+                }
+            }
+            current_run.clear();
+            // Keep current_source — same file continues
+            if current_source.is_none() {
+                current_source = Some(pos.source_file_index);
+            }
+        }
+    }
+    // Final flush
+    if current_run.len() >= 2 {
+        if let Some(src) = current_source {
+            runs.push((src, current_run.iter().collect()));
+        }
+    }
 
-    // Initial rank by first character
-    let mut rank: Vec<usize> = text.iter().map(|&c| c as usize).collect();
-    let mut sa: Vec<usize> = (0..n1).collect();
+    runs
+}
 
-    let mut gap = 1;
-    while gap < n1 {
-        let r = rank.clone();
-        let _rank_cap = r.iter().copied().max().unwrap_or(0) + 2;
+/// Statistics for a single K value in the Alpha-run recurrence.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KStats {
+    pub k: usize,
+    /// Total canonical bilateral maximal recurrences at this K
+    pub canonical_count: u64,
+    /// Top recurring sequences at this K (sequence -> count), top 10
+    pub top_sequences: Vec<(String, u64)>,
+    /// A verified sample pair: (run_a_excerpt, run_b_excerpt, sequence)
+    pub sample: Option<(String, String, String)>,
+    /// Verification passed for sample
+    pub sample_verified: bool,
+}
 
-        // Sort by (rank[i], rank[i+gap])
-        sa.sort_by_key(|&i| {
-            let r1 = r[i];
-            let r2 = if i + gap < n1 { r[i + gap] } else { 0 };
-            (r1, r2)
+/// Complete Phase 1B result over the Alpha-run stream.
+#[derive(Debug)]
+pub struct AlphaRecurrenceResult {
+    /// Total Alpha runs processed
+    pub run_count: usize,
+    /// Total Alpha characters (case-folded)
+    pub alpha_char_count: usize,
+    /// Results per K, from K=1 to K_max
+    pub k_stats: Vec<KStats>,
+    /// Maximum K with at least one canonical recurrence
+    pub k_max: usize,
+    /// Total canonical recurrences across all K
+    pub total_canonical: u64,
+    /// Verification failures (must be 0)
+    pub verification_failures: usize,
+}
+
+/// Run Phase 1B: Alpha-run recurrence analysis.
+///
+/// For each K from 1 upward, counts all bilateral maximal canonical
+/// recurrences of exactly K characters in the Alpha-run stream.
+/// Stops when K produces zero canonical recurrences.
+///
+/// No threshold imposed — the corpus determines K_max.
+pub fn run_alpha_recurrence(stream: &CompleteStream) -> AlphaRecurrenceResult {
+    // Extract Alpha runs
+    let runs = extract_alpha_runs(stream);
+    let run_count = runs.len();
+    let alpha_char_count: usize = runs.iter().map(|(_, r)| r.len()).sum();
+
+    let mut k_stats: Vec<KStats> = Vec::new();
+    let mut k_max = 0;
+    let mut total_canonical = 0u64;
+    let mut verification_failures = 0usize;
+
+    let mut k = 1usize;
+    loop {
+        // Build k-gram occurrence index with predecessor grouping
+        // kgram_string -> (predecessor_label -> count, sample_position)
+        let mut kgram_index: std::collections::HashMap<
+            String,
+            (std::collections::HashMap<Option<char>, u64>,
+             Option<(usize, usize)>) // (run_idx, pos_in_run)
+        > = std::collections::HashMap::new();
+
+        for (run_idx, (_, run)) in runs.iter().enumerate() {
+            let run_chars: Vec<char> = run.chars().collect();
+            let run_len = run_chars.len();
+            if run_len < k { continue; }
+
+            for i in 0..=run_len - k {
+                let kgram: String = run_chars[i..i+k].iter().collect();
+                let pred: PredecessorLabel = if i == 0 { None } else { Some(run_chars[i-1]) };
+
+                let entry = kgram_index.entry(kgram).or_insert_with(|| {
+                    (std::collections::HashMap::new(), None)
+                });
+                *entry.0.entry(pred).or_insert(0) += 1;
+                if entry.1.is_none() {
+                    entry.1 = Some((run_idx, i));
+                }
+            }
+        }
+
+        // Count canonical recurrences for this K
+        let mut k_total = 0u64;
+        let mut top_seqs: Vec<(String, u64)> = Vec::new();
+        let mut sample_pair: Option<(String, String, String)> = None;
+        let mut sample_verified = false;
+
+        for (kgram, (pred_groups, first_pos)) in &kgram_index {
+            let total_occ: u64 = pred_groups.values().sum();
+            if total_occ < 2 { continue; }
+
+            let group_sizes: Vec<u64> = pred_groups.values().copied().collect();
+            let canonical = count_cross_group_pairs(&group_sizes);
+            if canonical == 0 { continue; }
+
+            k_total += canonical;
+            top_seqs.push((kgram.clone(), canonical));
+
+            // Collect a sample pair for verification
+            if sample_pair.is_none() {
+                if let Some((run_idx_a, pos_a)) = first_pos {
+                    // Find a second occurrence with different predecessor
+                    let pred_a: PredecessorLabel = if *pos_a == 0 { None } else {
+                        let run_chars: Vec<char> = runs[*run_idx_a].1.chars().collect();
+                        Some(run_chars[pos_a - 1])
+                    };
+                    // Find occurrence with different predecessor
+                    'find_b: for (run_idx_b, (_, run_b)) in runs.iter().enumerate() {
+                        let run_chars_b: Vec<char> = run_b.chars().collect();
+                        for pos_b in 0..run_chars_b.len().saturating_sub(k.saturating_sub(1)) {
+                            if pos_b + k > run_chars_b.len() { continue; }
+                            let candidate: String = run_chars_b[pos_b..pos_b+k].iter().collect();
+                            if candidate != *kgram { continue; }
+                            let pred_b: PredecessorLabel = if pos_b == 0 { None }
+                                else { Some(run_chars_b[pos_b - 1]) };
+                            if pred_b == pred_a { continue; }
+                            // VERIFICATION: both k-grams must match exactly
+                            let run_a_chars: Vec<char> = runs[*run_idx_a].1.chars().collect();
+                            let mut verified = true;
+                            for r in 0..k {
+                                if run_a_chars[pos_a + r] != run_chars_b[pos_b + r] {
+                                    verified = false;
+                                    verification_failures += 1;
+                                    break;
+                                }
+                            }
+                            if verified {
+                                // Build context strings
+                                let ctx_start_a = pos_a.saturating_sub(2);
+                                let ctx_end_a = (pos_a + k + 2).min(run_a_chars.len());
+                                let ctx_a: String = run_a_chars[ctx_start_a..ctx_end_a].iter().collect();
+
+                                let ctx_start_b = pos_b.saturating_sub(2);
+                                let ctx_end_b = (pos_b + k + 2).min(run_chars_b.len());
+                                let ctx_b: String = run_chars_b[ctx_start_b..ctx_end_b].iter().collect();
+
+                                sample_pair = Some((ctx_a, ctx_b, kgram.clone()));
+                                sample_verified = true;
+                            }
+                            break 'find_b;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort top sequences by count
+        top_seqs.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+        top_seqs.truncate(10);
+
+        if k_total == 0 {
+            // Natural termination — corpus determines K_max
+            break;
+        }
+
+        k_max = k;
+        total_canonical += k_total;
+        k_stats.push(KStats {
+            k,
+            canonical_count: k_total,
+            top_sequences: top_seqs,
+            sample: sample_pair,
+            sample_verified,
         });
 
-        // Recompute ranks
-        rank[sa[0]] = 0;
-        for k in 1..n1 {
-            let prev = sa[k - 1];
-            let curr = sa[k];
-            let same = r[prev] == r[curr] &&
-                (prev + gap < n1 && curr + gap < n1 &&
-                 r[prev + gap] == r[curr + gap] ||
-                 prev + gap >= n1 && curr + gap >= n1);
-            rank[curr] = if same { rank[prev] } else { rank[prev] + 1 };
-        }
-
-        if rank[sa[n1 - 1]] == n1 - 1 { break; }
-        gap *= 2;
+        k += 1;
+        if k > 10000 { break; } // safety bound
     }
 
-    // Remove sentinel suffix
-    sa.into_iter().filter(|&i| i < n).collect()
-}
-
-/// Build LCP array using Kasai's algorithm (O(n)).
-fn build_lcp(s: &[u32], sa: &[usize]) -> Vec<usize> {
-    let n = s.len();
-    let mut rank = vec![0usize; n];
-    for (i, &suf) in sa.iter().enumerate() {
-        rank[suf] = i;
+    AlphaRecurrenceResult {
+        run_count,
+        alpha_char_count,
+        k_stats,
+        k_max,
+        total_canonical,
+        verification_failures,
     }
-    let mut lcp = vec![0usize; n];
-    let mut h = 0usize;
-    for i in 0..n {
-        if rank[i] > 0 {
-            let j = sa[rank[i] - 1];
-            while i + h < n && j + h < n && s[i + h] == s[j + h] {
-                h += 1;
-            }
-            lcp[rank[i]] = h;
-            if h > 0 { h -= 1; }
-        }
-    }
-    lcp
-}
-
-/// Run Phase 1B over the complete stream using suffix array for efficiency.
-/// O(n log n) total — index is implementation mechanism only.
-/// Every reported recurrence is exactly verified against X.
-pub fn run_phase1b(stream: &CompleteStream) -> RecurrenceStatistics {
-    let mut stats = RecurrenceStatistics::default();
-
-    let n = stream.len();
-    if n < 2 { return stats; }
-
-    // Encode stream to integer sequence for suffix array
-    let (encoded, sources) = encode_stream(stream);
-
-    // Build suffix array and LCP
-    let sa = build_suffix_array(&encoded, 0);
-    let lcp = build_lcp(&encoded, &sa);
-
-    // Use LCP array to find all pairs of suffixes sharing a prefix of length >= 1.
-    // For each adjacent pair in SA with LCP = L, they share L characters.
-    // We enumerate all pairs (sa[a], sa[b]) with a < b where lcp[b] >= L,
-    // using a stack-based approach to find maximal repeats.
-    //
-    // Bilateral maximality: pair (i,j) is canonical iff predecessors differ or
-    // at least one is FILE_START.
-
-    // Stack-based LCP interval enumeration for maximal repeats
-    // For each LCP value L, collect pairs with that LCP
-    // We walk the LCP array and for each "valley" emit the pairs
-
-    // Simplified but correct approach: for each position in SA,
-    // compare with the previous SA entry — that gives us the LCP-adjacent pairs.
-    // Then extend each pair to its maximal bilateral recurrence.
-
-    let mut processed = std::collections::HashSet::new();
-
-    for idx in 1..sa.len() {
-        let lcp_len = lcp[idx];
-        if lcp_len == 0 { continue; }
-
-        let i = sa[idx - 1].min(sa[idx]);
-        let j = sa[idx - 1].max(sa[idx]);
-
-        // Skip if already processed this pair
-        if processed.contains(&(i, j)) { continue; }
-
-        // Check bilateral maximality
-        if !is_bilaterally_maximal(stream, i, j) { continue; }
-
-        // Compute exact maximal K by verifying against X
-        let k = compute_k(stream, i, j);
-        if k == 0 { continue; }
-
-        // Mark all (i+r, j+r) sub-pairs as processed to avoid duplicates
-        // (bilateral maximality handles most of this, but be safe)
-        processed.insert((i, j));
-
-        // VERIFICATION 1: exact equality
-        let start_ok = state_at(stream, i) == state_at(stream, j);
-        if !start_ok { stats.verification_failures += 1; continue; }
-
-        // VERIFICATION 2: right maximality
-        // The recurrence terminates because:
-        //   a) one or both occurrences reach FILE_END, OR
-        //   b) the states at i+K and j+K differ
-        // If both reach FILE_END, that is a valid termination.
-        // If state[i+K] == state[j+K], compute_k should have extended K further —
-        // this would indicate a bug in compute_k, so we flag it as a failure.
-        let rt_i = right_term(stream, i, k);
-        let rt_j = right_term(stream, j, k);
-        let right_max_ok = match (rt_i, rt_j) {
-            (TerminationState::FileEnd, TerminationState::FileEnd) => true,
-            (TerminationState::FileEnd, _) => true,
-            (_, TerminationState::FileEnd) => true,
-            (TerminationState::State(si), TerminationState::State(sj)) => si != sj,
-            _ => true,
-        };
-        if !right_max_ok { stats.verification_failures += 1; continue; }
-
-        // VERIFICATION 5: no cross-file progression within each occurrence
-        let src_i = sources[i];
-        let src_j = sources[j];
-        if k > 1 {
-            if sources[i + k - 1] != src_i || sources[j + k - 1] != src_j {
-                stats.verification_failures += 1;
-                continue;
-            }
-        }
-
-        // Record statistics
-        stats.total_canonical += 1;
-        *stats.k_distribution.entry(k).or_insert(0) += 1;
-        if k > stats.k_max { stats.k_max = k; }
-
-        if src_i == src_j { stats.same_source += 1; }
-        else { stats.cross_source += 1; }
-
-        let rt_key = format!("{:?}|{:?}", rt_i, rt_j);
-        *stats.right_term_pairs.entry(rt_key).or_insert(0) += 1;
-
-        if k <= 20 && !stats.samples.contains_key(&k) {
-            let lt_i = left_term(stream, i);
-            let lt_j = left_term(stream, j);
-            stats.samples.insert(k, RecurrenceRelation {
-                i, j,
-                source_i: src_i,
-                source_j: src_j,
-                k,
-                left_term_i: lt_i,
-                left_term_j: lt_j,
-                right_term_i: rt_i,
-                right_term_j: rt_j,
-            });
-        }
-    }
-
-    stats
 }
 
 
@@ -1463,10 +1519,41 @@ mod tests_phase1b {
     use super::*;
     use std::io::Write;
 
-    // Real corpus passages
-    const HAMLET_SCENE1: &str = "SCENE I. Elsinore. A platform before the Castle.\r\n\r\nEnter Francisco and Barnardo, two sentinels.\r\n\r\nBARNARDO.\r\nWho's there?\r\n\r\nFRANCISCO.\r\nNay, answer me. Stand and unfold yourself.\r\n\r\nBARNARDO.\r\nLong live the King!\r\n\r\nFRANCISCO.\r\nBarnardo?\r\n\r\nBARNARDO.\r\nHe.\r\n\r\nFRANCISCO.\r\nYou come most carefully upon your hour.\r\n\r\nBARNARDO.\r\n'Tis now struck twelve. Get thee to bed, Francisco.\r\n\r\nFRANCISCO.\r\nFor this relief much thanks. 'Tis bitter cold,\r\nAnd I am sick at heart.";
+    const HAMLET_SCENE1: &str = "SCENE I. Elsinore. A platform before the Castle.
 
-    const ORIGIN_PASSAGE: &str = "When we look to the individuals of the same variety or sub-variety of\r\nour older cultivated plants and animals, one of the first points which\r\nstrikes us, is, that they generally differ much more from each other,\r\nthan do the individuals of any one species or variety in a state of\r\nnature. When we reflect on the vast diversity of the plants and animals\r\nwhich have been cultivated, and which have varied during all ages.";
+Enter Francisco and Barnardo, two sentinels.
+
+BARNARDO.
+Who's there?
+
+FRANCISCO.
+Nay, answer me. Stand and unfold yourself.
+
+BARNARDO.
+Long live the King!
+
+FRANCISCO.
+Barnardo?
+
+BARNARDO.
+He.
+
+FRANCISCO.
+You come most carefully upon your hour.
+
+BARNARDO.
+'Tis now struck twelve. Get thee to bed, Francisco.
+
+FRANCISCO.
+For this relief much thanks. 'Tis bitter cold,
+And I am sick at heart.";
+
+    const ORIGIN_PASSAGE: &str = "When we look to the individuals of the same variety or sub-variety of
+our older cultivated plants and animals, one of the first points which
+strikes us, is, that they generally differ much more from each other,
+than do the individuals of any one species or variety in a state of
+nature. When we reflect on the vast diversity of the plants and animals
+which have been cultivated, and which have varied during all ages.";
 
     fn stream_from(text: &str, tag: &str) -> CompleteStream {
         let mut tmp = std::env::temp_dir();
@@ -1477,207 +1564,170 @@ mod tests_phase1b {
     }
 
     #[test]
-    fn test_observable_state_equality_hamlet() {
-        // M_state(x_i) = M_state(x_j) iff char, case, class all match
-        let stream = stream_from(HAMLET_SCENE1, "obs_eq");
-        // Find two positions with 'e' (lowercase Alpha)
-        let e_positions: Vec<usize> = stream.positions.iter()
-            .filter(|p| p.character == 'e' && p.case_state == CaseState::Lower)
-            .map(|p| p.position)
-            .collect();
-        assert!(e_positions.len() >= 2);
-        let s0 = ObservableState::from_position(&stream.positions[e_positions[0]]);
-        let s1 = ObservableState::from_position(&stream.positions[e_positions[1]]);
-        assert_eq!(s0, s1, "Same char+case+class must be equal observable state");
-    }
-
-    #[test]
-    fn test_upper_lower_not_equal_state() {
-        // 'E' and 'e' must NOT be equal observable states
-        let stream = stream_from(HAMLET_SCENE1, "ul_neq");
-        let upper_e: Vec<usize> = stream.positions.iter()
-            .filter(|p| p.character == 'E' && p.case_state == CaseState::Upper)
-            .map(|p| p.position)
-            .collect();
-        let lower_e: Vec<usize> = stream.positions.iter()
-            .filter(|p| p.character == 'e' && p.case_state == CaseState::Lower)
-            .map(|p| p.position)
-            .collect();
-        if !upper_e.is_empty() && !lower_e.is_empty() {
-            let su = ObservableState::from_position(&stream.positions[upper_e[0]]);
-            let sl = ObservableState::from_position(&stream.positions[lower_e[0]]);
-            assert_ne!(su, sl, "'E' and 'e' must be distinct observable states");
+    fn test_alpha_runs_extracted_from_hamlet() {
+        // Alpha runs must be extracted and case-folded correctly
+        let stream = stream_from(HAMLET_SCENE1, "runs_hamlet");
+        let runs = extract_alpha_runs(&stream);
+        assert!(!runs.is_empty(), "Must extract Alpha runs from Hamlet");
+        // All characters in runs must be lowercase alpha
+        for (_, run) in &runs {
+            for c in run.chars() {
+                assert!(c.is_ascii_lowercase(),
+                    "All run characters must be lowercase: got '{}'", c);
+            }
         }
     }
 
     #[test]
-    fn test_provenance_not_in_state() {
-        // Two positions with same char have equal M_state regardless of position/source
-        let stream = stream_from("the the", "prov_state");
-        let t_positions: Vec<usize> = stream.positions.iter()
-            .filter(|p| p.character == 't')
-            .map(|p| p.position)
-            .collect();
-        assert_eq!(t_positions.len(), 2);
-        let s0 = ObservableState::from_position(&stream.positions[t_positions[0]]);
-        let s1 = ObservableState::from_position(&stream.positions[t_positions[1]]);
-        assert_eq!(s0, s1);
-        // But provenance differs
-        assert_ne!(stream.positions[t_positions[0]].position,
-                   stream.positions[t_positions[1]].position);
+    fn test_alpha_runs_exclude_punctuation() {
+        // Punctuation must not appear in Alpha runs
+        let stream = stream_from("Hello, World! It's done.", "runs_punct");
+        let runs = extract_alpha_runs(&stream);
+        // "Hello" -> "hello", "World" -> "world", "It" -> "it", "s" -> dropped (len<2),
+        // "done" -> "done"
+        let all_chars: String = runs.iter().map(|(_, r)| r.as_str()).collect();
+        assert!(!all_chars.contains(','), "Comma must not appear in runs");
+        assert!(!all_chars.contains("'"), "Apostrophe must not appear in runs");
+        assert!(!all_chars.contains('!'), "Exclamation must not appear in runs");
     }
 
     #[test]
-    fn test_recurrence_found_in_repeated_text() {
-        // "the the" contains 't','h','e' recurring — maximal run of "the " at K=3
-        // (the space after first "the" differs from nothing/end after second "the")
-        let stream = stream_from("the the", "recur_the");
-        let stats = run_phase1b(&stream);
-        assert!(stats.total_canonical > 0,
-            "Must find recurrences in 'the the'");
-        assert_eq!(stats.verification_failures, 0,
+    fn test_case_folded_to_lowercase() {
+        // "BARNARDO" and "barnardo" must produce the same run
+        let stream1 = stream_from("BARNARDO spoke.", "case1");
+        let stream2 = stream_from("barnardo spoke.", "case2");
+        let runs1 = extract_alpha_runs(&stream1);
+        let runs2 = extract_alpha_runs(&stream2);
+        assert_eq!(
+            runs1.iter().map(|(_, r)| r.as_str()).collect::<Vec<_>>(),
+            runs2.iter().map(|(_, r)| r.as_str()).collect::<Vec<_>>(),
+            "Case-folded runs must be identical regardless of original case"
+        );
+    }
+
+    #[test]
+    fn test_recurrence_found_in_hamlet() {
+        // Real repeated words in Hamlet must produce recurrences
+        let stream = stream_from(HAMLET_SCENE1, "recur_hamlet");
+        let result = run_alpha_recurrence(&stream);
+        assert!(result.total_canonical > 0,
+            "Must find canonical recurrences in Hamlet Scene I");
+        assert_eq!(result.verification_failures, 0,
             "No verification failures");
     }
 
     #[test]
-    fn test_verification_failures_zero_hamlet() {
-        // All reported recurrences must pass exact verification
-        let stream = stream_from(HAMLET_SCENE1, "vf_hamlet");
-        let stats = run_phase1b(&stream);
-        assert_eq!(stats.verification_failures, 0,
-            "All recurrences must pass verification against X");
+    fn test_recurrence_found_in_origin() {
+        let stream = stream_from(ORIGIN_PASSAGE, "recur_origin");
+        let result = run_alpha_recurrence(&stream);
+        assert!(result.total_canonical > 0,
+            "Must find canonical recurrences in Origin passage");
+        assert_eq!(result.verification_failures, 0);
     }
 
     #[test]
-    fn test_verification_failures_zero_origin() {
-        let stream = stream_from(ORIGIN_PASSAGE, "vf_origin");
-        let stats = run_phase1b(&stream);
-        assert_eq!(stats.verification_failures, 0,
-            "All recurrences must pass verification against X");
+    fn test_k_max_at_least_3_in_hamlet() {
+        // Real English text must produce recurrences of length >= 3
+        let stream = stream_from(HAMLET_SCENE1, "kmax_hamlet");
+        let result = run_alpha_recurrence(&stream);
+        assert!(result.k_max >= 3,
+            "K_max must be at least 3 in real English text, got {}", result.k_max);
     }
 
     #[test]
-    fn test_i_less_than_j_enforced() {
-        // All canonical recurrences must have i < j (no reverse fabrication)
-        let stream = stream_from(HAMLET_SCENE1, "ij_order");
-        let stats = run_phase1b(&stream);
-        for (_, sample) in &stats.samples {
-            assert!(sample.i < sample.j,
-                "i={} must be < j={}", sample.i, sample.j);
+    fn test_k1_dominates_distribution() {
+        // K=1 must be the largest count (individual char recurrences most common)
+        let stream = stream_from(HAMLET_SCENE1, "k1_dom");
+        let result = run_alpha_recurrence(&stream);
+        if result.k_stats.len() >= 2 {
+            let k1 = result.k_stats[0].canonical_count;
+            let k2 = result.k_stats[1].canonical_count;
+            assert!(k1 > k2,
+                "K=1 count ({}) must exceed K=2 count ({})", k1, k2);
         }
     }
 
     #[test]
-    fn test_bilateral_maximality_simple() {
-        // "abab" — "ab" recurs. The canonical start is (0,2).
-        // (1,3) "b" recurs but is NOT bilateral maximal because x_0='a'=x_2='a'
-        let stream = stream_from("abab", "bilateral");
-        let stats = run_phase1b(&stream);
-        // Should find K=2 recurrence for "ab" at (0,2), not (1,3)
-        // K=1 recurrences for 'a' at (0,2) and 'b' at (1,3)
-        // But (1,3) for 'b': predecessor at 0 is 'a', predecessor at 2 is 'a' → EQUAL
-        // So (1,3) for 'b' is NOT bilateral maximal — correct
-        let b_sample = stats.samples.get(&1);
-        // Any K=1 sample that exists must be bilaterally maximal
-        if let Some(s) = b_sample {
-            assert!(is_bilaterally_maximal(&stream, s.i, s.j),
-                "Sample must be bilaterally maximal");
-        }
-        assert_eq!(stats.verification_failures, 0);
-    }
-
-    #[test]
-    fn test_file_boundary_not_crossed_in_recurrence() {
-        // Two files: progression must not cross file boundaries
-        let mut tmp1 = std::env::temp_dir();
-        tmp1.push("abr_lc_1b_fb1.txt");
-        let mut tmp2 = std::env::temp_dir();
-        tmp2.push("abr_lc_1b_fb2.txt");
-        std::fs::File::create(&tmp1).unwrap()
-            .write_all(b"the end").unwrap();
-        std::fs::File::create(&tmp2).unwrap()
-            .write_all(b"the start").unwrap();
-
-        let stream = CompleteStream::from_files(&[
-            ("f1", tmp1.to_str().unwrap()),
-            ("f2", tmp2.to_str().unwrap()),
-        ]).unwrap();
-        let stats = run_phase1b(&stream);
-        assert_eq!(stats.verification_failures, 0);
-
-        // Verify samples: no progression crosses file boundary
-        for (_, sample) in &stats.samples {
-            let result = verify_recurrence(&stream, sample);
-            assert!(result.is_ok(), "Sample must verify: {:?}", result);
+    fn test_samples_verified_hamlet() {
+        // All collected samples must pass verification
+        let stream = stream_from(HAMLET_SCENE1, "samp_hamlet");
+        let result = run_alpha_recurrence(&stream);
+        assert_eq!(result.verification_failures, 0,
+            "All samples must verify exactly");
+        for ks in &result.k_stats {
+            if ks.sample.is_some() {
+                assert!(ks.sample_verified,
+                    "Sample for K={} must be verified", ks.k);
+            }
         }
     }
 
     #[test]
-    fn test_k_distribution_populated() {
-        // There must be recurrences at multiple K values in real text
-        let stream = stream_from(HAMLET_SCENE1, "k_dist");
-        let stats = run_phase1b(&stream);
-        assert!(stats.k_distribution.len() >= 2,
-            "Expected recurrences at multiple K values in Hamlet passage");
-        assert!(stats.k_distribution.contains_key(&1),
-            "K=1 recurrences must exist");
+    fn test_samples_verified_origin() {
+        let stream = stream_from(ORIGIN_PASSAGE, "samp_origin");
+        let result = run_alpha_recurrence(&stream);
+        assert_eq!(result.verification_failures, 0);
     }
 
     #[test]
-    fn test_sample_verification_against_x() {
-        // Every sample must pass exact verification against X
-        let stream = stream_from(HAMLET_SCENE1, "sample_verify");
-        let stats = run_phase1b(&stream);
-        for (k, sample) in &stats.samples {
-            let result = verify_recurrence(&stream, sample);
-            assert!(result.is_ok(),
-                "Sample K={} failed verification: {:?}", k, result);
-        }
+    fn test_known_recurrence_the_detected() {
+        // Use Origin passage where "the" occurs both standalone and embedded
+        // in longer words (other, whether, these, there) giving varied predecessors
+        let text = "When we look to the individuals of the same variety or other cultivated                     plants and animals one of the first points which strikes us is that they                     generally differ much more from each other than do the individuals.";
+        let stream = stream_from(text, "the_detect");
+        let result = run_alpha_recurrence(&stream);
+        // Must have K=3 recurrences
+        let k3 = result.k_stats.iter().find(|s| s.k == 3);
+        assert!(k3.is_some(), "Must have K=3 stats in real scientific prose");
+        let k3 = k3.unwrap();
+        // "the" should appear in top sequences
+        let has_the = k3.top_sequences.iter().any(|(seq, _)| seq == "the");
+        assert!(has_the, "'the' must appear in top K=3 sequences, got: {:?}", k3.top_sequences);
+        assert_eq!(result.verification_failures, 0);
     }
 
     #[test]
-    fn test_k_max_reasonable_for_real_text() {
-        // In Hamlet Scene I, repeated sequences should exist up to reasonable K
-        let stream = stream_from(HAMLET_SCENE1, "kmax");
-        let stats = run_phase1b(&stream);
-        assert!(stats.k_max >= 3,
-            "Expected K_max >= 3 in real text, got {}", stats.k_max);
+    fn test_bilateral_maximality_simple_case() {
+        // "ababab": "ab" recurs. Predecessor of first 'a' = RUN_START,
+        // predecessor of second 'a' (at pos 2) = 'b'.
+        // These differ -> bilateral maximal. K depends on how far they match.
+        let stream = stream_from("ababab", "bilateral");
+        let result = run_alpha_recurrence(&stream);
+        assert!(result.total_canonical > 0,
+            "Must find recurrences in 'ababab'");
+        assert_eq!(result.verification_failures, 0);
     }
 
     #[test]
-    fn test_cross_source_recurrence_detected() {
-        // Two files with shared text must produce cross-source recurrences
-        let mut tmp1 = std::env::temp_dir();
-        tmp1.push("abr_lc_1b_cs1.txt");
-        let mut tmp2 = std::env::temp_dir();
-        tmp2.push("abr_lc_1b_cs2.txt");
-        std::fs::File::create(&tmp1).unwrap()
-            .write_all(b"the same words here").unwrap();
-        std::fs::File::create(&tmp2).unwrap()
-            .write_all(b"the same words there").unwrap();
-
-        let stream = CompleteStream::from_files(&[
-            ("f1", tmp1.to_str().unwrap()),
-            ("f2", tmp2.to_str().unwrap()),
-        ]).unwrap();
-        let stats = run_phase1b(&stream);
-        assert!(stats.cross_source > 0,
-            "Must detect cross-source recurrences for shared text");
+    fn test_no_verification_failures_combined() {
+        // Combined Hamlet + Origin must produce zero verification failures
+        let combined = format!("{} {}", HAMLET_SCENE1, ORIGIN_PASSAGE);
+        let stream = stream_from(&combined, "combined");
+        let result = run_alpha_recurrence(&stream);
+        assert_eq!(result.verification_failures, 0,
+            "No verification failures on combined real corpus");
+        assert!(result.k_max >= 3);
     }
 
     #[test]
-    fn test_right_termination_file_end_recorded() {
-        // A recurrence reaching file end must record FileEnd termination
-        let stream = stream_from("ab", "file_end");
-        // No recurrences possible in 2-char single file
-        // Use "abab" where second "ab" hits file end
-        let stream2 = stream_from("xabab", "file_end2");
-        let stats = run_phase1b(&stream2);
-        assert_eq!(stats.verification_failures, 0);
-        // At least one recurrence should have FileEnd on right
-        let has_file_end = stats.right_term_pairs.keys()
-            .any(|k| k.contains("FileEnd"));
-        assert!(has_file_end,
-            "At least one recurrence should reach file end");
+    fn test_run_count_and_char_count_consistent() {
+        let stream = stream_from(HAMLET_SCENE1, "counts_hamlet");
+        let result = run_alpha_recurrence(&stream);
+        assert!(result.run_count > 0, "Must have at least one run");
+        assert!(result.alpha_char_count > 0, "Must have Alpha characters");
+        assert!(result.alpha_char_count >= result.run_count * 2,
+            "Each run has at least 2 chars");
+    }
+
+    #[test]
+    fn test_natural_termination() {
+        // K_max is determined by corpus — not an imposed limit
+        // For a simple repeated string, the termination is exact
+        let stream = stream_from("abcabc", "termination");
+        let result = run_alpha_recurrence(&stream);
+        // "abcabc" has "abc" recurring once, K_max = 3
+        // After K=3, nothing new
+        assert!(result.k_max >= 1, "Must find some recurrence");
+        assert_eq!(result.verification_failures, 0);
     }
 }

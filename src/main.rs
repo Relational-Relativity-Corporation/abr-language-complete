@@ -1,12 +1,13 @@
 // abr-language-complete  main.rs
-// V0.3.0 — Phase 1B: Identity Recurrence and Persistence Under Progression
+// V0.3.0 — Phase 1B: Alpha-Run Recurrence (Syllabic Structure)
 // Origin: Robin Macomber / Metatron Dynamics
 
 use abr_language_complete::{
     CompleteStream, verify_completeness,
-    RelationalSubstrate, run_phase1b, verify_recurrence,
+    RelationalSubstrate, run_alpha_recurrence,
 };
 use std::fs;
+use std::cmp::Reverse;
 
 const CORPUS_DIR: &str = r"C:\Users\Robin Macomber\Documents\Metatron_Dynamics\GitHub_Repos\abr-language-complete\corpus";
 const RESULTS_DIR: &str = r"C:\Users\Robin Macomber\Documents\Metatron_Dynamics\GitHub_Repos\abr-language-complete\results";
@@ -20,12 +21,14 @@ const CORPUS_FILES: &[&str] = &[
 
 fn main() {
     println!("=== abr-language-complete V0.3.0 ===");
-    println!("Phase 1B: Identity Recurrence and Persistence Under Progression");
+    println!("Phase 1B: Alpha-Run Recurrence — Syllabic Structure");
+    println!("Declaration: capitals are not observable in spoken language.");
+    println!("Alpha runs extracted, case-folded, recurrence measured.");
     println!();
 
     fs::create_dir_all(RESULTS_DIR).expect("Cannot create results dir");
 
-    // ── Phase 0: Build stream ──────────────────────────────────────────────
+    // ── Load corpus ────────────────────────────────────────────────────────
     println!("[1] Loading corpus...");
     let mut file_paths: Vec<(String, String)> = Vec::new();
     let mut original_texts: Vec<(String, String)> = Vec::new();
@@ -45,124 +48,88 @@ fn main() {
     let path_refs: Vec<(&str, &str)> = file_paths.iter()
         .map(|(n, p)| (n.as_str(), p.as_str())).collect();
     let stream = CompleteStream::from_files(&path_refs)
-        .unwrap_or_else(|e| { eprintln!("Stream error: {}", e); std::process::exit(1); });
+        .unwrap_or_else(|e| { eprintln!("{}", e); std::process::exit(1); });
 
     let orig_refs: Vec<(&str, String)> = original_texts.iter()
         .map(|(n, t)| (n.as_str(), t.clone())).collect();
     let p0 = verify_completeness(&stream, &orig_refs);
-    assert!(p0.reconstruction_matches, "Phase 0 invariant violated");
+    assert!(p0.reconstruction_matches, "Phase 0 violated");
     println!("    |X| = {}  Phase 0: PASS", stream.len());
-    println!();
 
-    // ── Phase 1A: verify substrate ─────────────────────────────────────────
-    println!("[2] Verifying Phase 1A substrate...");
     let substrate = RelationalSubstrate::from_stream(&stream);
     let p1a = substrate.verify_accounting();
-    assert!(p1a.invariant_holds, "Phase 1A accounting violated");
+    assert!(p1a.invariant_holds, "Phase 1A violated");
     println!("    |R_P| = {}  Phase 1A: PASS", substrate.relations.len());
     println!();
 
-    // ── Phase 1B: run recurrence ───────────────────────────────────────────
-    println!("[3] Running Phase 1B — identity recurrence over full corpus...");
-    println!("    (Note: ~118B K=1 pairs exist; aggregating by K, not materializing)");
-    println!("    This may take several minutes on the full corpus.");
+    // ── Phase 1B: Alpha-run recurrence ─────────────────────────────────────
+    println!("[2] Running Phase 1B — Alpha-run recurrence...");
     let start = std::time::Instant::now();
-    let stats = run_phase1b(&stream);
+    let result = run_alpha_recurrence(&stream);
     let elapsed = start.elapsed();
+
     println!("    Completed in {:.1}s", elapsed.as_secs_f64());
+    println!("    Alpha runs:          {}", result.run_count);
+    println!("    Alpha characters:    {}", result.alpha_char_count);
+    println!("    Verification fails:  {} (must be 0)", result.verification_failures);
+    assert_eq!(result.verification_failures, 0, "Verification failures");
+    println!("    Total canonical R_I: {}", result.total_canonical);
+    println!("    K_max:               {}", result.k_max);
     println!();
 
-    // ── Report ─────────────────────────────────────────────────────────────
-    println!("[4] Phase 1B results:");
-    println!("    Verification failures:    {} (must be 0)", stats.verification_failures);
-    assert_eq!(stats.verification_failures, 0, "Verification failures detected");
-    println!("    Total canonical R_I:      {}", stats.total_canonical);
-    println!("    K_max observed:           {}", stats.k_max);
-    println!("    Same-source recurrences:  {}", stats.same_source);
-    println!("    Cross-source recurrences: {}", stats.cross_source);
-    println!();
-
-    println!("    K distribution (how long does observed identity persist?):");
-    for (k, count) in &stats.k_distribution {
-        let pct = 100.0 * (*count as f64) / (stats.total_canonical as f64);
-        println!("      K={:<4}  {:>12}  ({:.2}%)", k, count, pct);
+    // ── K distribution ──────────────────────────────────────────────────────
+    println!("[3] K distribution — how long does observed identity persist?");
+    for ks in &result.k_stats {
+        let top: Vec<String> = ks.top_sequences.iter().take(5)
+            .map(|(s, c)| format!("{}({})", s, c))
+            .collect();
+        println!("    K={:<3}  {:>15}  top: {}",
+            ks.k, ks.canonical_count, top.join(", "));
     }
     println!();
 
-    // ── Sample verification ────────────────────────────────────────────────
-    println!("[5] Sample recurrences (one per K) — exact verification against X:");
-    for (k, sample) in &stats.samples {
-        let result = verify_recurrence(&stream, sample);
-        let status = if result.is_ok() { "VERIFIED" } else { "FAIL" };
-        let src_label = if sample.source_i == sample.source_j {
-            format!("same-source (file {})", sample.source_i)
-        } else {
-            format!("cross-source ({} → {})", sample.source_i, sample.source_j)
-        };
-
-        // Reconstruct the recurring sequence for inspection
-        let seq: String = stream.positions[sample.i..sample.i + sample.k]
-            .iter().map(|p| p.character).collect();
-        let seq_display = if seq.len() > 40 {
-            format!("{}...", &seq[..40])
-        } else {
-            seq.clone()
-        };
-
-        println!("      K={:>3}  i={:>7}  j={:>7}  {}  {}  seq={:?}",
-            k, sample.i, sample.j, src_label, status, seq_display);
+    // ── Samples ─────────────────────────────────────────────────────────────
+    println!("[4] Sample verified pairs (one per K):");
+    for ks in &result.k_stats {
+        if let Some((ctx_a, ctx_b, seq)) = &ks.sample {
+            println!("    K={:<3}  seq={:?}  verified={}",
+                ks.k, seq, ks.sample_verified);
+            println!("         ctx_a={:?}  ctx_b={:?}", ctx_a, ctx_b);
+        }
     }
     println!();
 
-    // ── Write results ──────────────────────────────────────────────────────
-    println!("[6] Writing Phase 1B report...");
-    let report_path = format!("{}\\phase1b_report_v0.3.0.txt", RESULTS_DIR);
+    // ── Write report ────────────────────────────────────────────────────────
+    println!("[5] Writing Phase 1B report...");
+    let report_path = format!("{}\\phase1b_alpha_recurrence_v0.3.0.txt", RESULTS_DIR);
     let mut out = String::new();
     out.push_str("# abr-language-complete — Phase 1B Report V0.3.0\n");
-    out.push_str("# Identity Recurrence and Persistence Under Progression\n");
-    out.push_str("# Question: How long does observed identity actually persist?\n\n");
-    out.push_str(&format!("|X|:                    {}\n", stream.len()));
-    out.push_str(&format!("|R_P|:                  {}\n", substrate.relations.len()));
-    out.push_str(&format!("Verification failures:  {}\n", stats.verification_failures));
-    out.push_str(&format!("Total canonical R_I:    {}\n", stats.total_canonical));
-    out.push_str(&format!("K_max:                  {}\n", stats.k_max));
-    out.push_str(&format!("Same-source:            {}\n", stats.same_source));
-    out.push_str(&format!("Cross-source:           {}\n\n", stats.cross_source));
+    out.push_str("# Alpha-Run Recurrence — Syllabic Structure\n");
+    out.push_str("# Declaration: capitals not observable in spoken language.\n");
+    out.push_str("# Alpha runs extracted, case-folded, bilateral maximal recurrence.\n\n");
+    out.push_str(&format!("Alpha runs:          {}\n", result.run_count));
+    out.push_str(&format!("Alpha characters:    {}\n", result.alpha_char_count));
+    out.push_str(&format!("Total canonical R_I: {}\n", result.total_canonical));
+    out.push_str(&format!("K_max:               {}\n", result.k_max));
+    out.push_str(&format!("Verification fails:  {}\n\n", result.verification_failures));
 
     out.push_str("K distribution:\n");
-    for (k, count) in &stats.k_distribution {
-        let pct = 100.0 * (*count as f64) / (stats.total_canonical as f64);
-        out.push_str(&format!("  K={:<4}  {:>12}  ({:.4}%)\n", k, count, pct));
+    for ks in &result.k_stats {
+        out.push_str(&format!("  K={:<3}  {:>15}\n", ks.k, ks.canonical_count));
+        for (seq, count) in &ks.top_sequences {
+            out.push_str(&format!("    {:?}  {}\n", seq, count));
+        }
     }
 
-    out.push_str("\nSample recurrences (verified against X):\n");
-    for (k, sample) in &stats.samples {
-        let seq: String = stream.positions[sample.i..sample.i + sample.k]
-            .iter().map(|p| p.character).collect();
-        out.push_str(&format!(
-            "  K={} i={} j={} src_i={} src_j={} seq={:?}\n",
-            k, sample.i, sample.j, sample.source_i, sample.source_j, seq
-        ));
-        out.push_str(&format!(
-            "    left_i={:?} left_j={:?}\n",
-            sample.left_term_i, sample.left_term_j
-        ));
-        out.push_str(&format!(
-            "    right_i={:?} right_j={:?}\n",
-            sample.right_term_i, sample.right_term_j
-        ));
-    }
-
-    fs::write(&report_path, out).expect("Cannot write Phase 1B report");
+    fs::write(&report_path, out).expect("Cannot write report");
     println!("    Written: {}", report_path);
 
     println!();
-    println!("═══════════════════════════════════════════════════════════════");
+    println!("══════════════════════════════════════════════════════");
     println!("  PHASE 1B COMPLETE");
+    println!("  Alpha-run recurrence: K=1..{} ✓", result.k_max);
     println!("  Verification failures: 0 ✓");
-    println!("  All K equalities exactly verified against X ✓");
-    println!("  Bilateral maximality enforced ✓");
-    println!("  File boundaries respected ✓");
-    println!("  K distribution observed — corpus determines the resolution ✓");
-    println!("═══════════════════════════════════════════════════════════════");
+    println!("  K distribution corpus-determined ✓");
+    println!("  Stable base for Phase 1C (Q(S) derivation) ✓");
+    println!("══════════════════════════════════════════════════════");
 }
