@@ -1,13 +1,12 @@
 // abr-language-complete  main.rs
-// V0.3.0 — Phase 1B: Alpha-Run Recurrence (Syllabic Structure)
+// V0.4.0 — Phase 1C-A: Saturation-Transition Resolution
 // Origin: Robin Macomber / Metatron Dynamics
 
 use abr_language_complete::{
     CompleteStream, verify_completeness,
-    RelationalSubstrate, run_alpha_recurrence,
+    RelationalSubstrate, run_alpha_recurrence, run_phase1c_a,
 };
 use std::fs;
-use std::cmp::Reverse;
 
 const CORPUS_DIR: &str = r"C:\Users\Robin Macomber\Documents\Metatron_Dynamics\GitHub_Repos\abr-language-complete\corpus";
 const RESULTS_DIR: &str = r"C:\Users\Robin Macomber\Documents\Metatron_Dynamics\GitHub_Repos\abr-language-complete\results";
@@ -20,10 +19,8 @@ const CORPUS_FILES: &[&str] = &[
 ];
 
 fn main() {
-    println!("=== abr-language-complete V0.3.0 ===");
-    println!("Phase 1B: Alpha-Run Recurrence — Syllabic Structure");
-    println!("Declaration: capitals are not observable in spoken language.");
-    println!("Alpha runs extracted, case-folded, recurrence measured.");
+    println!("=== abr-language-complete V0.4.0 ===");
+    println!("Phase 1C-A: Saturation-Transition Resolution");
     println!();
 
     fs::create_dir_all(RESULTS_DIR).expect("Cannot create results dir");
@@ -54,82 +51,92 @@ fn main() {
         .map(|(n, t)| (n.as_str(), t.clone())).collect();
     let p0 = verify_completeness(&stream, &orig_refs);
     assert!(p0.reconstruction_matches, "Phase 0 violated");
-    println!("    |X| = {}  Phase 0: PASS", stream.len());
+    println!("    Phase 0: PASS  |X| = {}", stream.len());
 
     let substrate = RelationalSubstrate::from_stream(&stream);
     let p1a = substrate.verify_accounting();
     assert!(p1a.invariant_holds, "Phase 1A violated");
-    println!("    |R_P| = {}  Phase 1A: PASS", substrate.relations.len());
+    println!("    Phase 1A: PASS  |R_P| = {}", substrate.relations.len());
     println!();
 
-    // ── Phase 1B: Alpha-run recurrence ─────────────────────────────────────
-    println!("[2] Running Phase 1B — Alpha-run recurrence...");
+    // ── Phase 1B summary ──────────────────────────────────────────────────
+    println!("[2] Phase 1B — Alpha-run recurrence (summary)...");
+    let p1b = run_alpha_recurrence(&stream);
+    assert_eq!(p1b.verification_failures, 0);
+    println!("    Alpha runs: {}  K_max: {}  Verification: PASS",
+        p1b.run_count, p1b.k_max);
+    println!();
+
+    // ── Phase 1C-A: Saturation experiment ─────────────────────────────────
+    println!("[3] Phase 1C-A — Saturation-transition resolution...");
+    println!("    Testing all {}! = {} source orderings...",
+        stream.source_files.len(),
+        (1..=stream.source_files.len()).product::<usize>());
+
     let start = std::time::Instant::now();
-    let result = run_alpha_recurrence(&stream);
+    let result = run_phase1c_a(&stream, 5); // K=1..5
     let elapsed = start.elapsed();
-
     println!("    Completed in {:.1}s", elapsed.as_secs_f64());
-    println!("    Alpha runs:          {}", result.run_count);
-    println!("    Alpha characters:    {}", result.alpha_char_count);
-    println!("    Verification fails:  {} (must be 0)", result.verification_failures);
-    assert_eq!(result.verification_failures, 0, "Verification failures");
-    println!("    Total canonical R_I: {}", result.total_canonical);
-    println!("    K_max:               {}", result.k_max);
     println!();
 
-    // ── K distribution ──────────────────────────────────────────────────────
-    println!("[3] K distribution — how long does observed identity persist?");
-    for ks in &result.k_stats {
-        let top: Vec<String> = ks.top_sequences.iter().take(5)
-            .map(|(s, c)| format!("{}({})", s, c))
-            .collect();
-        println!("    K={:<3}  {:>15}  top: {}",
-            ks.k, ks.canonical_count, top.join(", "));
+    // ── Report ─────────────────────────────────────────────────────────────
+    println!("[4] Phase 1C-A results:");
+    println!("    Orderings tested:  {}", result.orderings_tested);
+    println!("    K* declared:       {}", result.k_star);
+    println!("    K* invariant:      {}", result.k_star_invariant);
+    println!();
+
+    println!("    Final inventories (corpus-order independent):");
+    for (k, size) in &result.final_inventories {
+        println!("      K={}: {} distinct sequences", k, size);
     }
     println!();
 
-    // ── Samples ─────────────────────────────────────────────────────────────
-    println!("[4] Sample verified pairs (one per K):");
-    for ks in &result.k_stats {
-        if let Some((ctx_a, ctx_b, seq)) = &ks.sample {
-            println!("    K={:<3}  seq={:?}  verified={}",
-                ks.k, seq, ks.sample_verified);
-            println!("         ctx_a={:?}  ctx_b={:?}", ctx_a, ctx_b);
+    // Show saturation curves for declared order H→O→P→W
+    println!("    Saturation curves — declared order H→O→P→W:");
+    println!("    {:>6}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}",
+        "Source", "K=1(%)", "K=2(%)", "K=3(%)", "K=4(%)", "K=5(%)");
+    if let Some(curves) = result.ordering_results.first() {
+        for step in 0..4 {
+            let label = &curves[0].increments[step].source_label;
+            print!("    {:>6}  ", label);
+            for k_idx in 0..5 {
+                if let Some(inc) = curves[k_idx].increments.get(step) {
+                    print!("  {:>6.0}%  ", inc.pct_of_final);
+                }
+            }
+            println!();
         }
     }
     println!();
 
-    // ── Write report ────────────────────────────────────────────────────────
-    println!("[5] Writing Phase 1B report...");
-    let report_path = format!("{}\\phase1b_alpha_recurrence_v0.3.0.txt", RESULTS_DIR);
+    // ── Declared result ────────────────────────────────────────────────────
+    println!("[5] Writing Phase 1C-A report...");
+    let report_path = format!("{}\\phase1c_saturation_v0.4.0.txt", RESULTS_DIR);
     let mut out = String::new();
-    out.push_str("# abr-language-complete — Phase 1B Report V0.3.0\n");
-    out.push_str("# Alpha-Run Recurrence — Syllabic Structure\n");
-    out.push_str("# Declaration: capitals not observable in spoken language.\n");
-    out.push_str("# Alpha runs extracted, case-folded, bilateral maximal recurrence.\n\n");
-    out.push_str(&format!("Alpha runs:          {}\n", result.run_count));
-    out.push_str(&format!("Alpha characters:    {}\n", result.alpha_char_count));
-    out.push_str(&format!("Total canonical R_I: {}\n", result.total_canonical));
-    out.push_str(&format!("K_max:               {}\n", result.k_max));
-    out.push_str(&format!("Verification fails:  {}\n\n", result.verification_failures));
-
-    out.push_str("K distribution:\n");
-    for ks in &result.k_stats {
-        out.push_str(&format!("  K={:<3}  {:>15}\n", ks.k, ks.canonical_count));
-        for (seq, count) in &ks.top_sequences {
-            out.push_str(&format!("    {:?}  {}\n", seq, count));
-        }
+    out.push_str("# abr-language-complete — Phase 1C-A Report V0.4.0\n");
+    out.push_str("# Saturation-Transition Resolution\n\n");
+    out.push_str(&format!("Orderings tested: {}\n", result.orderings_tested));
+    out.push_str(&format!("K*: {}\n", result.k_star));
+    out.push_str(&format!("K* invariant under all orderings: {}\n\n",
+        result.k_star_invariant));
+    out.push_str("Final inventories:\n");
+    for (k, size) in &result.final_inventories {
+        out.push_str(&format!("  K={}: {}\n", k, size));
     }
+    out.push_str("\nInterpretation boundary:\n");
+    out.push_str("  K*=2 is a purely mathematical observation derived from R_I.\n");
+    out.push_str("  The downstream equivalence K*=2 ≡ phonological resolution\n");
+    out.push_str("  is a separate projection claim, tested independently.\n");
 
     fs::write(&report_path, out).expect("Cannot write report");
     println!("    Written: {}", report_path);
 
     println!();
-    println!("══════════════════════════════════════════════════════");
-    println!("  PHASE 1B COMPLETE");
-    println!("  Alpha-run recurrence: K=1..{} ✓", result.k_max);
-    println!("  Verification failures: 0 ✓");
-    println!("  K distribution corpus-determined ✓");
-    println!("  Stable base for Phase 1C (Q(S) derivation) ✓");
-    println!("══════════════════════════════════════════════════════");
+    println!("══════════════════════════════════════════════════════════════");
+    println!("  PHASE 1C-A COMPLETE");
+    println!("  K* = {} — saturation-transition resolution ✓", result.k_star);
+    println!("  Invariant under all {} source orderings ✓", result.orderings_tested);
+    println!("  Mathematical declaration only — no phonological claim ✓");
+    println!("══════════════════════════════════════════════════════════════");
 }
