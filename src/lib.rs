@@ -517,17 +517,27 @@ pub fn run_saturation_experiment(
 }
 
 /// Result of the full Phase 1C-A control: all source orderings.
+///
+/// DECLARED RESULT: The raw saturation curves S_K(t) are the primary observation.
+/// Two distinct structures are preserved:
+///   1. S_K(t) — saturation rate by K (monotonically decreasing with K at first exposure)
+///   2. Final inventory cardinality — non-monotonic, peaks at K=4 in this corpus
+/// These are not collapsed into a single K*.
+/// Phase 1C-B will derive Q(S) from these observed structures.
 #[derive(Debug)]
 pub struct Phase1CResult {
-    /// K* — the observed saturation-transition resolution
+    /// Not the primary result — see ordering_results for S_K(t) curves.
+    /// Retained for structural compatibility only.
     pub k_star: usize,
-    /// K* is invariant under all tested orderings
+    /// Not applicable — K* is not declared in Phase 1C-A.
     pub k_star_invariant: bool,
-    /// Number of orderings tested
+    /// Number of orderings tested (n! where n = source file count)
     pub orderings_tested: usize,
-    /// For each ordering: saturation curves at K=1..k_max
+    /// PRIMARY RESULT: For each ordering: saturation curves S_K(t) at K=1..k_max.
+    /// S_K(t) = |I_K(D_t)| / |I_K(D_full)| at each corpus increment t.
     pub ordering_results: Vec<Vec<SaturationCurve>>,
-    /// Final inventory sizes by K (corpus-order independent)
+    /// Final inventory cardinality |I_K(D_full)| per K — corpus-order independent.
+    /// Distinct observable: non-monotonic in K, peaks around K=4 in this corpus.
     pub final_inventories: Vec<(usize, usize)>, // (k, inventory_size)
 }
 
@@ -568,49 +578,29 @@ pub fn run_phase1c_a(stream: &CompleteStream, k_max: usize) -> Phase1CResult {
         .map(|k| (k, ordering_results[0][k-1].final_inventory))
         .collect();
 
-    // Determine K* over the declared search domain K >= 2.
+    // Phase 1C-A declares the raw saturation curves S_K(t), not a derived K*.
     //
-    // DECLARATION: K=1 is the already-declared single-locus alphabet substrate.
-    // It is not a candidate for the recurrence saturation-transition K*.
-    // The search domain is K in {2, ..., k_max-1}.
+    // DECLARATION: K=1 is the declared single-locus alphabet substrate.
+    // It is not collapsed into the saturation-transition analysis.
     //
-    // K* is the largest K in the search domain where:
-    //   K saturates significantly faster than K+1
-    //   AND this holds across ALL source orderings.
+    // Two distinct observable structures are preserved:
     //
-    // "Saturates faster" = pct_after_first_source(K) > pct_after_first_source(K+1)
-    // in every ordering. This is computed, not asserted.
+    // 1. S_K(t) = |I_K(D_t)| / |I_K(D_full)| — saturation curve per K
+    //    Observed: S_K decreases monotonically with K at first corpus exposure.
+    //    This ordering persists across all 24 source orderings.
     //
-    // If no such transition is found, k_star_invariant = false.
-
-    let mut k_star = 0usize; // 0 = not yet found
-    let mut k_star_invariant = false;
-
-    // Search domain: K=2..k_max-1 (K=1 excluded as alphabet substrate)
-    for k in 2..k_max {
-        // Check: does K saturate faster than K+1 in ALL orderings?
-        let k_faster_in_all = ordering_results.iter().all(|curves| {
-            let pct_k = curves[k-1].increments.first()
-                .map_or(0.0, |i| i.pct_of_final);
-            let pct_k1 = curves[k].increments.first()
-                .map_or(0.0, |i| i.pct_of_final);
-            pct_k > pct_k1
-        });
-
-        if k_faster_in_all {
-            // This K is a saturation-transition candidate.
-            // Record it — we want the LARGEST such K that still satisfies this.
-            // (The transition point is where rapid saturation ends.)
-            k_star = k;
-            k_star_invariant = true;
-        }
-    }
-
-    // If no transition found in search domain, report failure
-    if k_star == 0 {
-        k_star = 2; // fallback — but invariant will be false
-        k_star_invariant = false;
-    }
+    // 2. Final inventory cardinality: |I_K(D_full)| per K
+    //    Observed: non-monotonic — peaks at K=4 in this corpus, declines at K=5.
+    //    This is a distinct structural observation from (1).
+    //
+    // These two observables should not be collapsed into a single K*.
+    // Phase 1C-B will examine what relational transformation of these
+    // curves produces Q(S).
+    //
+    // k_star and k_star_invariant are retained as fields for compatibility
+    // but are not the primary declared result of Phase 1C-A.
+    let k_star = 0usize; // Not declared — see saturation curves instead
+    let k_star_invariant = false; // Not applicable
 
     Phase1CResult {
         k_star,
@@ -2103,39 +2093,45 @@ which have been cultivated, and which have varied during all ages.";
     }
 
     #[test]
-    fn test_saturation_k2_faster_than_k3_two_sources() {
-        // With Hamlet as first source and Origin as second:
-        // K=2 must capture a higher pct of final inventory after Hamlet
-        // than K=3 does — across both orderings.
+    fn test_saturation_monotone_with_k_two_sources() {
+        // S_K(t) is monotonically decreasing with K at first corpus exposure.
+        // After first source: S_2 > S_3 in both orderings.
+        // This is the primary declared observation of Phase 1C-A.
         let stream_ho = two_source_stream(
             HAMLET_SCENE1, "hamlet_sat",
             ORIGIN_PASSAGE, "origin_sat"
         );
         let result_ho = run_phase1c_a(&stream_ho, 3);
 
-        // In both orderings: K=2 pct@first > K=3 pct@first
         for curves in &result_ho.ordering_results {
             let pct_k2 = curves[1].increments.first()
                 .map_or(0.0, |i| i.pct_of_final);
             let pct_k3 = curves[2].increments.first()
                 .map_or(0.0, |i| i.pct_of_final);
             assert!(pct_k2 > pct_k3,
-                "K=2 ({:.0}%) must saturate faster than K=3 ({:.0}%) after first source",
+                "S_2 ({:.0}%) must exceed S_3 ({:.0}%) after first source — monotone saturation",
                 pct_k2, pct_k3);
         }
     }
 
     #[test]
-    fn test_k_star_invariant_two_sources() {
-        // K* must be invariant under both orderings of two sources
+    fn test_saturation_ordering_invariant() {
+        // The monotone ordering S_2 > S_3 must hold in both source orderings.
+        // This is the invariance claim for Phase 1C-A.
         let stream = two_source_stream(
             HAMLET_SCENE1, "kstar_h",
             ORIGIN_PASSAGE, "kstar_o"
         );
         let result = run_phase1c_a(&stream, 4);
-        assert!(result.k_star_invariant,
-            "K*={} must be invariant under all {} orderings",
-            result.k_star, result.orderings_tested);
+        // In ALL orderings: S_2@first > S_3@first > S_4@first
+        for curves in &result.ordering_results {
+            let s2 = curves[1].increments.first().map_or(0.0, |i| i.pct_of_final);
+            let s3 = curves[2].increments.first().map_or(0.0, |i| i.pct_of_final);
+            let s4 = curves[3].increments.first().map_or(0.0, |i| i.pct_of_final);
+            assert!(s2 > s3 && s3 > s4,
+                "Saturation must be monotone: S_2({:.0}%) > S_3({:.0}%) > S_4({:.0}%)",
+                s2, s3, s4);
+        }
     }
 
     #[test]
@@ -2148,9 +2144,10 @@ which have been cultivated, and which have varied during all ages.";
             ORIGIN_PASSAGE, "k1sat_o"
         );
         let result = run_phase1c_a(&stream, 3);
-        // K* must not be 1
-        assert!(result.k_star >= 2,
-            "K* must be >= 2 — K=1 is the alphabet substrate, not a transition candidate");
+        // K* is not declared in Phase 1C-A (k_star=0 by convention)
+        // What matters is the saturation ordering, not a derived K*
+        assert_eq!(result.k_star, 0,
+            "K* must not be declared in Phase 1C-A — raw curves are the result");
         // K=1 does saturate faster than K=2 (this is the factual basis for exclusion)
         for curves in &result.ordering_results {
             let pct_k1 = curves[0].increments.first()
@@ -2208,22 +2205,32 @@ which have been cultivated, and which have varied during all ages.";
     }
 
     #[test]
-    fn test_k_star_declared_correctly() {
-        // K* must be >= 2 (search domain excludes K=1 as alphabet substrate)
-        // K* must be < k_max (there must be a K above it that saturates slower)
-        // K* must be invariant (same value across all orderings)
+    fn test_phase1ca_primary_observation() {
+        // Phase 1C-A primary declared observation:
+        // S_K(t) is monotonically decreasing with K at first corpus exposure,
+        // and this ordering is invariant across source orderings.
+        // K* is NOT declared. Two distinct structures are preserved:
+        //   1. Saturation rate (monotone decreasing with K)
+        //   2. Final inventory cardinality (non-monotonic, peaks at K=4)
         let stream = two_source_stream(
             HAMLET_SCENE1, "kstar_d",
             ORIGIN_PASSAGE, "kstar_d2"
         );
         let result = run_phase1c_a(&stream, 4);
-        assert!(result.k_star >= 2,
-            "K* must be >= 2 (K=1 is excluded as alphabet substrate, got {})",
-            result.k_star);
-        assert!(result.k_star < 4,
-            "K* must be less than k_max=4, got {}", result.k_star);
-        assert!(result.k_star_invariant,
-            "K* must be invariant across all {} orderings", result.orderings_tested);
+        // Verify saturation ordering in all orderings
+        for curves in &result.ordering_results {
+            let s2 = curves[1].increments.first().map_or(0.0, |i| i.pct_of_final);
+            let s3 = curves[2].increments.first().map_or(0.0, |i| i.pct_of_final);
+            assert!(s2 > s3,
+                "S_2 > S_3 must hold in all orderings");
+        }
+        // Final inventories are corpus-order independent
+        let finv: Vec<usize> = result.final_inventories.iter()
+            .map(|(_, s)| *s).collect();
+        assert!(finv[0] > 0, "K=1 inventory non-empty");
+        assert!(finv[1] > finv[0], "K=2 > K=1");
+        // Note: final inventories are NOT required to be monotone
+        // (the peak at K=4 and decline at K=5 is itself an observation)
     }
 
     #[test]
