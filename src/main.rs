@@ -82,8 +82,13 @@ fn main() {
     // ── Report ─────────────────────────────────────────────────────────────
     println!("[4] Phase 1C-A results:");
     println!("    Orderings tested:  {}", result.orderings_tested);
-    println!("    K* declared:       {}", result.k_star);
-    println!("    K* invariant:      {}", result.k_star_invariant);
+    println!("    Search domain:     K>=2 (K=1 excluded as alphabet substrate)");
+    println!("    K* computed:       {}", result.k_star);
+    println!("    K* invariant:      {} (across all {} orderings)",
+        result.k_star_invariant, result.orderings_tested);
+    if !result.k_star_invariant {
+        println!("    WARNING: K* is NOT invariant — result inconclusive");
+    }
     println!();
 
     println!("    Final inventories (corpus-order independent):");

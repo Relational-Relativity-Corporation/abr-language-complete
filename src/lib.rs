@@ -568,43 +568,49 @@ pub fn run_phase1c_a(stream: &CompleteStream, k_max: usize) -> Phase1CResult {
         .map(|k| (k, ordering_results[0][k-1].final_inventory))
         .collect();
 
-    // Determine K*: smallest K where pct_after_first_source is
-    // substantially greater than pct_after_first_source at K+1,
-    // AND this holds across ALL orderings.
+    // Determine K* over the declared search domain K >= 2.
     //
-    // Criterion: K* is the transition point where
-    //   avg(pct@first_source, K*) - avg(pct@first_source, K*+1) > threshold
-    // across all orderings.
+    // DECLARATION: K=1 is the already-declared single-locus alphabet substrate.
+    // It is not a candidate for the recurrence saturation-transition K*.
+    // The search domain is K in {2, ..., k_max-1}.
+    //
+    // K* is the largest K in the search domain where:
+    //   K saturates significantly faster than K+1
+    //   AND this holds across ALL source orderings.
+    //
+    // "Saturates faster" = pct_after_first_source(K) > pct_after_first_source(K+1)
+    // in every ordering. This is computed, not asserted.
+    //
+    // If no such transition is found, k_star_invariant = false.
 
-    let mut k_star = 1usize;
-    for k in 1..k_max {
-        // For each ordering, compare pct@first_source at K vs K+1
-        let mut k2_faster_count = 0;
-        for curves in &ordering_results {
+    let mut k_star = 0usize; // 0 = not yet found
+    let mut k_star_invariant = false;
+
+    // Search domain: K=2..k_max-1 (K=1 excluded as alphabet substrate)
+    for k in 2..k_max {
+        // Check: does K saturate faster than K+1 in ALL orderings?
+        let k_faster_in_all = ordering_results.iter().all(|curves| {
             let pct_k = curves[k-1].increments.first()
                 .map_or(0.0, |i| i.pct_of_final);
             let pct_k1 = curves[k].increments.first()
                 .map_or(0.0, |i| i.pct_of_final);
-            if pct_k > pct_k1 {
-                k2_faster_count += 1;
-            }
-        }
-        if k2_faster_count == orderings_tested {
-            // K saturates faster than K+1 in ALL orderings
-            // Keep extending to find where this stops being true
+            pct_k > pct_k1
+        });
+
+        if k_faster_in_all {
+            // This K is a saturation-transition candidate.
+            // Record it — we want the LARGEST such K that still satisfies this.
+            // (The transition point is where rapid saturation ends.)
             k_star = k;
-            break;
+            k_star_invariant = true;
         }
     }
 
-    // Verify invariance: K* holds in ALL orderings
-    let k_star_invariant = ordering_results.iter().all(|curves| {
-        let pct_kstar = curves[k_star-1].increments.first()
-            .map_or(0.0, |i| i.pct_of_final);
-        let pct_above = curves[k_star].increments.first()
-            .map_or(0.0, |i| i.pct_of_final);
-        pct_kstar > pct_above
-    });
+    // If no transition found in search domain, report failure
+    if k_star == 0 {
+        k_star = 2; // fallback — but invariant will be false
+        k_star_invariant = false;
+    }
 
     Phase1CResult {
         k_star,
@@ -2133,20 +2139,26 @@ which have been cultivated, and which have varied during all ages.";
     }
 
     #[test]
-    fn test_k1_saturates_first() {
-        // K=1 must always have higher pct@first_source than K=2
+    fn test_k1_excluded_from_search_domain() {
+        // K=1 is the declared alphabet substrate — excluded from K* search.
+        // It saturates faster than K=2, but that is not the transition we seek.
+        // K* is derived over K>=2 only.
         let stream = two_source_stream(
             HAMLET_SCENE1, "k1sat_h",
             ORIGIN_PASSAGE, "k1sat_o"
         );
         let result = run_phase1c_a(&stream, 3);
+        // K* must not be 1
+        assert!(result.k_star >= 2,
+            "K* must be >= 2 — K=1 is the alphabet substrate, not a transition candidate");
+        // K=1 does saturate faster than K=2 (this is the factual basis for exclusion)
         for curves in &result.ordering_results {
             let pct_k1 = curves[0].increments.first()
                 .map_or(0.0, |i| i.pct_of_final);
             let pct_k2 = curves[1].increments.first()
                 .map_or(0.0, |i| i.pct_of_final);
             assert!(pct_k1 >= pct_k2,
-                "K=1 ({:.0}%) must saturate at least as fast as K=2 ({:.0}%)",
+                "K=1 ({:.0}%) saturates at least as fast as K=2 ({:.0}%) — confirmed basis for exclusion",
                 pct_k1, pct_k2);
         }
     }
@@ -2197,14 +2209,21 @@ which have been cultivated, and which have varied during all ages.";
 
     #[test]
     fn test_k_star_declared_correctly() {
-        // K* must be at least 1 and at most k_max-1
+        // K* must be >= 2 (search domain excludes K=1 as alphabet substrate)
+        // K* must be < k_max (there must be a K above it that saturates slower)
+        // K* must be invariant (same value across all orderings)
         let stream = two_source_stream(
             HAMLET_SCENE1, "kstar_d",
             ORIGIN_PASSAGE, "kstar_d2"
         );
         let result = run_phase1c_a(&stream, 4);
-        assert!(result.k_star >= 1, "K* must be at least 1");
-        assert!(result.k_star < 4, "K* must be less than k_max");
+        assert!(result.k_star >= 2,
+            "K* must be >= 2 (K=1 is excluded as alphabet substrate, got {})",
+            result.k_star);
+        assert!(result.k_star < 4,
+            "K* must be less than k_max=4, got {}", result.k_star);
+        assert!(result.k_star_invariant,
+            "K* must be invariant across all {} orderings", result.orderings_tested);
     }
 
     #[test]
