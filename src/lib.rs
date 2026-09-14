@@ -1355,9 +1355,16 @@ pub fn run_phase1b(stream: &CompleteStream) -> RecurrenceStatistics {
         if !start_ok { stats.verification_failures += 1; continue; }
 
         // VERIFICATION 2: right maximality
+        // The recurrence terminates because:
+        //   a) one or both occurrences reach FILE_END, OR
+        //   b) the states at i+K and j+K differ
+        // If both reach FILE_END, that is a valid termination.
+        // If state[i+K] == state[j+K], compute_k should have extended K further —
+        // this would indicate a bug in compute_k, so we flag it as a failure.
         let rt_i = right_term(stream, i, k);
         let rt_j = right_term(stream, j, k);
         let right_max_ok = match (rt_i, rt_j) {
+            (TerminationState::FileEnd, TerminationState::FileEnd) => true,
             (TerminationState::FileEnd, _) => true,
             (_, TerminationState::FileEnd) => true,
             (TerminationState::State(si), TerminationState::State(sj)) => si != sj,
